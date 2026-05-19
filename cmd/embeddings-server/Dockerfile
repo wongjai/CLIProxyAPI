@@ -6,16 +6,20 @@
 # drop-in replacement for the upstream cli-proxy-api image.
 #
 # Credentials are resolved at request time, in priority order:
-#   1. cfg.GeminiKey         — `gemini-api-key:` in config.yaml (also
-#                              writable via the management UI). Each
-#                              entry's BaseURL/Headers are honoured.
-#   2. env GCP_API_KEY       — Generative Language API fallback.
-#   3. env GCP_SA_JSON_PATH  — real Vertex AI via OAuth
-#                              (requires GCP_PROJECT_ID, GCP_REGION).
+#   1. auths/<file>.json type=vertex
+#                            — Vertex AI OAuth from the management UI's
+#                              "Vertex AI service account" upload.
+#   2. cfg.VertexCompatAPIKey — `vertex-api-key:` entries in config.yaml.
+#                              Requires base-url (third-party endpoints).
+#   3. cfg.GeminiKey         — `gemini-api-key:` entries in config.yaml.
+#                              (Generative Language API)
+#   4. env GCP_SA_JSON_PATH  — real Vertex AI OAuth from disk
+#                              (requires GCP_PROJECT_ID; GCP_REGION optional).
+#   5. env GCP_API_KEY       — Generative Language API fallback.
 #
 # The binary boots with NO credentials configured; /v1/embeddings returns
-# 503 with a clear message until creds appear. config.yaml is mtime-
-# watched, so adding a gemini-api-key via the management UI takes effect
+# 503 with a clear message until creds appear. config.yaml AND the auth
+# dir are mtime-watched, so uploads via the management UI take effect
 # without restarting the container.
 #
 # Build (from the repository root, NOT from this directory):

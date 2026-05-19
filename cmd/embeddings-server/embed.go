@@ -1,19 +1,28 @@
 // Package main: embed.go implements the /v1/embeddings HTTP handler and a
 // small embedContent client. Credentials are picked up at request time
-// (with mtime-based caching of config.yaml) so adding a Gemini API key
-// via the CLIProxyAPI management UI takes effect immediately.
+// (with mtime-based caching of config.yaml) so adding a key via the
+// CLIProxyAPI management UI takes effect immediately.
 //
-// Two upstream paths are supported and chosen by priority:
+// Backend selection (priority order):
 //
-//  1. cfg.GeminiKey   (config.yaml `gemini-api-key:` entry, also from
-//     management UI). Calls the Generative Language API
-//     with ?key=<APIKey>.
-//  2. env GCP_API_KEY (same as above, but from environment).
-//  3. env GCP_SA_JSON_PATH (+ GCP_PROJECT_ID, GCP_REGION). Calls real
-//     Vertex AI with an OAuth bearer token.
+//  1. auths/<file>.json with type=vertex
+//     → real Vertex AI OAuth. The management UI's "Vertex AI service
+//     account" upload writes this file. ServiceAccount JSON inside
+//     drives token refresh; ProjectID & Location come from the
+//     surrounding wrapper.
+//  2. cfg.VertexCompatAPIKey[0]
+//     → third-party Vertex-compatible provider via x-goog-api-key
+//     header. Requires a non-empty base-url because real Vertex AI
+//     API keys cannot call embedContent (Google requires OAuth).
+//  3. cfg.GeminiKey[0]
+//     → Generative Language API via ?key=<APIKey>.
+//  4. env GCP_SA_JSON_PATH + GCP_PROJECT_ID + GCP_REGION
+//     → real Vertex AI OAuth from a path on disk.
+//  5. env GCP_API_KEY
+//     → Generative Language fallback.
 //
-// If none of the three is configured, the handler responds 503 with a
-// clear message rather than the binary refusing to start.
+// If none is configured, /v1/embeddings responds 503 with a clear message
+// rather than the binary refusing to boot.
 package main
 
 import (
@@ -31,6 +40,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -42,26 +53,16 @@ import (
 )
 
 const (
-	// vertexScope is the OAuth scope required to call Vertex AI.
-	vertexScope = "https://www.googleapis.com/auth/cloud-platform"
-
-	// defaultConcurrency bounds how many embedContent calls run in
-	// parallel for a single request.
+	vertexScope        = "https://www.googleapis.com/auth/cloud-platform"
 	defaultConcurrency = 6
-
-	// perRequestTimeout caps the total time spent serving one
-	// /v1/embeddings call.
-	perRequestTimeout = 60 * time.Second
-
-	// perCallTimeout caps a single embedContent call.
-	perCallTimeout = 25 * time.Second
+	perRequestTimeout  = 60 * time.Second
+	perCallTimeout     = 25 * time.Second
 
 	// Default model IDs per backend when neither the request nor the
 	// EMBED_MODEL_ID env specifies one.
 	defaultModelGenLang = "text-embedding-004"
 	defaultModelVertex  = "gemini-embedding-2"
 
-	// Default base URLs.
 	defaultGenLangBaseURL = "https://generativelanguage.googleapis.com"
 )
 
@@ -69,40 +70,57 @@ const (
 type authMode string
 
 const (
-	authVertexOAuth      authMode = "vertex_oauth"
-	authGenerativeAPIKey authMode = "generative_api_key"
+	authVertexOAuth        authMode = "vertex_oauth"
+	authVertexCompatAPIKey authMode = "vertex_compat_api_key"
+	authGenerativeAPIKey   authMode = "generative_api_key"
 )
 
-// credential is the immutable input to newEmbedClient. Fingerprint lets
-// the resolver detect when the underlying source changed and rebuild the
-// client only then.
+// credential is the immutable input to newEmbedClient.
 type credential struct {
-	mode         authMode
-	apiKey       string
-	saJSONPath   string
-	projectID    string
-	region       string
-	baseURL      string // empty → use backend default
-	headers      map[string]string
+	mode authMode
+
+	// Vertex OAuth
+	saJSONBytes []byte // raw service-account JSON for google.CredentialsFromJSON
+	projectID   string
+	region      string
+
+	// Vertex-compat API key (mode == authVertexCompatAPIKey)
+	// Uses apiKey + baseURL; sends x-goog-api-key header.
+
+	// Generative Language API key (mode == authGenerativeAPIKey)
+	// Uses apiKey + (optional) baseURL.
+
+	apiKey  string
+	baseURL string
+	headers map[string]string
+
 	modelDefault string
-	source       string // human-readable origin for logs ("config.gemini-api-key[0]", "env:GCP_API_KEY", ...)
+	source       string
 }
 
-// fingerprint returns a hash that changes whenever any field that
-// affects upstream calls changes. apiKey and saJSONPath contribute via
-// hash to avoid logging raw secrets when this string surfaces.
+// fingerprint hashes everything that affects the upstream call so the
+// resolver knows when to rebuild the cached client. Secrets are folded
+// into the hash, never logged verbatim.
 func (c *credential) fingerprint() string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|", c.mode, c.apiKey, c.saJSONPath, c.projectID, c.region, c.baseURL)
-	for k, v := range c.headers {
-		fmt.Fprintf(h, "%s=%s;", k, v)
+	fmt.Fprintf(h, "%s|", c.mode)
+	h.Write(c.saJSONBytes)
+	fmt.Fprintf(h, "|%s|%s|%s|", c.projectID, c.region, c.baseURL)
+	h.Write([]byte(c.apiKey))
+	keys := make([]string, 0, len(c.headers))
+	for k := range c.headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(h, "|%s=%s", k, c.headers[k])
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// resolver holds the env fallbacks plus a tiny mtime-keyed cache of
-// config.yaml, and lazily builds/replaces an embedClient when the active
-// credential changes.
+// resolver holds env fallbacks plus a small mtime-keyed cache of
+// config.yaml + auth dir scans, and lazily builds/replaces an embedClient
+// when the active credential changes.
 type resolver struct {
 	env *envSettings
 
@@ -110,6 +128,11 @@ type resolver struct {
 	// config.yaml cache
 	cfgMtime time.Time
 	cfg      *sdkconfig.Config
+
+	// auth-dir scan cache (mtime keyed)
+	authMtime  time.Time
+	authVertex *vertexAuthFile
+
 	// active client cache
 	client      *embedClient
 	clientPrint string
@@ -119,15 +142,22 @@ func newResolver(env *envSettings) *resolver {
 	return &resolver{env: env}
 }
 
-// refreshConfig stat()s the config file and reloads it if the mtime
-// changed. The reload uses the public SDK loader so we never reach into
-// internal/config. Errors during reload are non-fatal: we keep the old
-// cached cfg.
+// vertexAuthFile is the on-disk format the management UI writes for a
+// Vertex service-account credential. We only care about the SA JSON and
+// the project/location wrapper fields.
+type vertexAuthFile struct {
+	ServiceAccount map[string]any `json:"service_account"`
+	ProjectID      string         `json:"project_id"`
+	Location       string         `json:"location"`
+	Type           string         `json:"type"`
+	path           string         // populated post-decode
+}
+
+// refreshConfig stat()s the config file and reloads via the public SDK
+// loader if mtime changed. Errors are non-fatal; we keep the old cache.
 func (r *resolver) refreshConfig() {
 	info, err := os.Stat(r.env.cliproxyCfg)
 	if err != nil {
-		// File missing/unreadable: drop any stale cfg so the resolver
-		// falls back to env-only.
 		r.cfg = nil
 		return
 	}
@@ -136,18 +166,128 @@ func (r *resolver) refreshConfig() {
 	}
 	newCfg, err := sdkconfig.LoadConfig(r.env.cliproxyCfg)
 	if err != nil {
-		// Keep old cache on parse error.
 		return
 	}
 	r.cfg = newCfg
 	r.cfgMtime = info.ModTime()
 }
 
-// selectCredential walks the priority order and returns the first
+// expandAuthDir resolves the auth-dir setting, expanding a leading "~"
+// to the current user's home (mirroring internal/util.ResolveAuthDir).
+func expandAuthDir(raw string) string {
+	if raw == "" {
+		raw = "~/.cli-proxy-api"
+	}
+	if strings.HasPrefix(raw, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Clean(raw)
+		}
+		rest := strings.TrimLeft(strings.TrimPrefix(raw, "~"), "/\\")
+		if rest == "" {
+			return filepath.Clean(home)
+		}
+		return filepath.Clean(filepath.Join(home, filepath.FromSlash(rest)))
+	}
+	return filepath.Clean(raw)
+}
+
+// refreshAuthScan walks the auth directory and picks the first vertex
+// credential file (sorted alphabetically for determinism). The scan is
+// keyed by the directory's mtime so we only re-walk when files change.
+func (r *resolver) refreshAuthScan() {
+	authDir := ""
+	if r.cfg != nil {
+		authDir = r.cfg.AuthDir
+	}
+	authDir = expandAuthDir(authDir)
+
+	info, err := os.Stat(authDir)
+	if err != nil {
+		r.authVertex = nil
+		return
+	}
+	if r.authVertex != nil && info.ModTime().Equal(r.authMtime) {
+		return
+	}
+	r.authMtime = info.ModTime()
+	r.authVertex = nil
+
+	entries, err := os.ReadDir(authDir)
+	if err != nil {
+		return
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		full := filepath.Join(authDir, name)
+		data, err := os.ReadFile(full)
+		if err != nil {
+			continue
+		}
+		var file vertexAuthFile
+		if err := json.Unmarshal(data, &file); err != nil {
+			continue
+		}
+		if !strings.EqualFold(file.Type, "vertex") || len(file.ServiceAccount) == 0 {
+			continue
+		}
+		file.path = full
+		r.authVertex = &file
+		return
+	}
+}
+
+// selectCredential walks the priority chain and returns the first
 // credential source that has the data it needs. Returns nil when nothing
 // is configured.
 func (r *resolver) selectCredential() *credential {
+	// 1. Vertex SA JSON from auths/
+	if r.authVertex != nil {
+		saBytes, err := json.Marshal(r.authVertex.ServiceAccount)
+		if err == nil && len(saBytes) > 0 {
+			region := strings.TrimSpace(r.authVertex.Location)
+			if region == "" {
+				region = "us-central1"
+			}
+			return &credential{
+				mode:         authVertexOAuth,
+				saJSONBytes:  saBytes,
+				projectID:    strings.TrimSpace(r.authVertex.ProjectID),
+				region:       region,
+				modelDefault: defaultModelVertex,
+				source:       "auths:" + filepath.Base(r.authVertex.path),
+			}
+		}
+	}
+
 	if r.cfg != nil {
+		// 2. Vertex-compat API key
+		for i, k := range r.cfg.VertexCompatAPIKey {
+			key := strings.TrimSpace(k.APIKey)
+			if key == "" {
+				continue
+			}
+			return &credential{
+				mode:         authVertexCompatAPIKey,
+				apiKey:       key,
+				baseURL:      strings.TrimSpace(k.BaseURL),
+				headers:      k.Headers,
+				modelDefault: defaultModelVertex,
+				source:       fmt.Sprintf("config.vertex-api-key[%d]", i),
+			}
+		}
+		// 3. Generative Language API key
 		for i, k := range r.cfg.GeminiKey {
 			key := strings.TrimSpace(k.APIKey)
 			if key == "" {
@@ -163,6 +303,26 @@ func (r *resolver) selectCredential() *credential {
 			}
 		}
 	}
+
+	// 4. Env Vertex OAuth
+	if r.env.saJSONPath != "" && r.env.projectID != "" {
+		data, err := os.ReadFile(r.env.saJSONPath)
+		if err == nil && len(data) > 0 {
+			region := r.env.region
+			if region == "" {
+				region = "us-central1"
+			}
+			return &credential{
+				mode:         authVertexOAuth,
+				saJSONBytes:  data,
+				projectID:    r.env.projectID,
+				region:       region,
+				modelDefault: defaultModelVertex,
+				source:       "env:GCP_SA_JSON_PATH",
+			}
+		}
+	}
+	// 5. Env Generative Language API key
 	if r.env.apiKey != "" {
 		return &credential{
 			mode:         authGenerativeAPIKey,
@@ -171,28 +331,18 @@ func (r *resolver) selectCredential() *credential {
 			source:       "env:GCP_API_KEY",
 		}
 	}
-	if r.env.saJSONPath != "" && r.env.projectID != "" {
-		return &credential{
-			mode:         authVertexOAuth,
-			saJSONPath:   r.env.saJSONPath,
-			projectID:    r.env.projectID,
-			region:       r.env.region,
-			modelDefault: defaultModelVertex,
-			source:       "env:GCP_SA_JSON_PATH",
-		}
-	}
 	return nil
 }
 
 // resolveClient returns the active embedClient, rebuilding it if the
-// credential fingerprint changed since the last call. Returns nil
-// *embedClient when no credentials are configured anywhere; the handler
-// translates that to 503.
+// credential fingerprint changed since the last call.
 func (r *resolver) resolveClient(ctx context.Context) (*embedClient, *credential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.refreshConfig()
+	r.refreshAuthScan()
+
 	cred := r.selectCredential()
 	if cred == nil {
 		r.client = nil
@@ -212,34 +362,30 @@ func (r *resolver) resolveClient(ctx context.Context) (*embedClient, *credential
 	return c, cred, nil
 }
 
-// embedClient holds the authenticated HTTP client and the URL template
-// for whichever backend is configured.
+// embedClient holds the authenticated HTTP client and the URL/header
+// template for whichever backend is configured.
 type embedClient struct {
 	mode       authMode
 	httpClient *http.Client
 
-	// Vertex OAuth fields
+	// Vertex OAuth
 	projectID string
 	region    string
 
-	// Generative Language fields
+	// API-key modes
 	apiKey  string
-	baseURL string // may be empty → defaultGenLangBaseURL
+	baseURL string
 
-	// Shared
 	headers map[string]string
 }
 
-// newEmbedClient constructs the appropriate backend client from a
-// resolved credential.
 func newEmbedClient(ctx context.Context, cred *credential) (*embedClient, error) {
 	switch cred.mode {
 	case authVertexOAuth:
-		saBytes, err := os.ReadFile(cred.saJSONPath)
-		if err != nil {
-			return nil, fmt.Errorf("read service account JSON: %w", err)
+		if cred.projectID == "" {
+			return nil, errors.New("vertex oauth: project_id is empty (set it in the auth file or GCP_PROJECT_ID)")
 		}
-		creds, err := google.CredentialsFromJSON(ctx, saBytes, vertexScope)
+		creds, err := google.CredentialsFromJSON(ctx, cred.saJSONBytes, vertexScope)
 		if err != nil {
 			return nil, fmt.Errorf("parse service account JSON: %w", err)
 		}
@@ -250,6 +396,19 @@ func newEmbedClient(ctx context.Context, cred *credential) (*embedClient, error)
 			region:     cred.region,
 			headers:    cred.headers,
 		}, nil
+
+	case authVertexCompatAPIKey:
+		if strings.TrimSpace(cred.baseURL) == "" {
+			return nil, errors.New("vertex-api-key requires base-url: real Vertex AI does not accept API keys for embedContent; set base-url to a third-party Vertex-compatible provider")
+		}
+		return &embedClient{
+			mode:       cred.mode,
+			httpClient: &http.Client{},
+			apiKey:     cred.apiKey,
+			baseURL:    cred.baseURL,
+			headers:    cred.headers,
+		}, nil
+
 	case authGenerativeAPIKey:
 		return &embedClient{
 			mode:       cred.mode,
@@ -258,6 +417,7 @@ func newEmbedClient(ctx context.Context, cred *credential) (*embedClient, error)
 			baseURL:    cred.baseURL,
 			headers:    cred.headers,
 		}, nil
+
 	default:
 		return nil, fmt.Errorf("unsupported auth mode %q", cred.mode)
 	}
@@ -271,6 +431,9 @@ func (ec *embedClient) endpoint(modelID string) string {
 			"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:embedContent",
 			ec.region, ec.projectID, ec.region, modelID,
 		)
+	case authVertexCompatAPIKey:
+		base := strings.TrimRight(ec.baseURL, "/")
+		return fmt.Sprintf("%s/v1/publishers/google/models/%s:embedContent", base, modelID)
 	case authGenerativeAPIKey:
 		base := strings.TrimRight(ec.baseURL, "/")
 		if base == "" {
@@ -283,7 +446,7 @@ func (ec *embedClient) endpoint(modelID string) string {
 	}
 }
 
-// embedRequestBody is the JSON payload both backends accept.
+// embedRequestBody is the JSON payload all backends accept.
 //
 // gemini-embedding-2 fuses all parts of a single content into one vector,
 // so callers MUST send exactly one input per request.
@@ -301,21 +464,18 @@ type embedPart struct {
 	Text string `json:"text"`
 }
 
-// embedResponseBody mirrors the shape both backends return.
 type embedResponseBody struct {
 	Embedding struct {
 		Values []float64 `json:"values"`
 	} `json:"embedding"`
 }
 
-// embed performs one embedContent call for a single text input.
 func (ec *embedClient) embed(ctx context.Context, modelID, text string, dim *int) ([]float64, error) {
 	body := embedRequestBody{
 		Content:              embedContent{Parts: []embedPart{{Text: text}}},
 		OutputDimensionality: dim,
 	}
 	if ec.mode == authGenerativeAPIKey {
-		// Generative Language API expects `models/<id>` here.
 		body.Model = "models/" + modelID
 	}
 
@@ -332,6 +492,9 @@ func (ec *embedClient) embed(ctx context.Context, modelID, text string, dim *int
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if ec.mode == authVertexCompatAPIKey {
+		req.Header.Set("x-goog-api-key", ec.apiKey)
+	}
 	for k, v := range ec.headers {
 		req.Header.Set(k, v)
 	}
@@ -357,8 +520,6 @@ func (ec *embedClient) embed(ctx context.Context, modelID, text string, dim *int
 	return parsed.Embedding.Values, nil
 }
 
-// upstreamHTTPError carries the raw upstream status & body so the handler
-// can translate it into an OpenAI-style error response.
 type upstreamHTTPError struct {
 	status int
 	body   string
@@ -368,9 +529,6 @@ func (e *upstreamHTTPError) Error() string {
 	return fmt.Sprintf("upstream http %d: %s", e.status, e.body)
 }
 
-// openAIEmbedRequest accepts the OpenAI embeddings request shape. `Input`
-// is left as RawMessage because OpenAI permits either a string or an
-// array of strings.
 type openAIEmbedRequest struct {
 	Model          string          `json:"model"`
 	Input          json.RawMessage `json:"input"`
@@ -378,7 +536,6 @@ type openAIEmbedRequest struct {
 	EncodingFormat string          `json:"encoding_format,omitempty"`
 }
 
-// openAIEmbedResponse is the OpenAI embeddings response shape.
 type openAIEmbedResponse struct {
 	Object string                `json:"object"`
 	Data   []openAIEmbeddingItem `json:"data"`
@@ -397,7 +554,6 @@ type openAIUsage struct {
 	TotalTokens  int `json:"total_tokens"`
 }
 
-// parseInputs normalises the OpenAI `input` field to []string.
 func parseInputs(raw json.RawMessage) ([]string, error) {
 	if len(raw) == 0 {
 		return nil, errors.New("missing input field")
@@ -424,9 +580,6 @@ func parseInputs(raw json.RawMessage) ([]string, error) {
 	return nil, errors.New("input must be a string or array of strings")
 }
 
-// encodeBase64Vector packs a float64 slice into IEEE-754 little-endian
-// float32 bytes and base64-encodes the result, matching OpenAI's
-// `encoding_format: "base64"` convention.
 func encodeBase64Vector(values []float64) string {
 	buf := make([]byte, 4*len(values))
 	for i, v := range values {
@@ -435,7 +588,6 @@ func encodeBase64Vector(values []float64) string {
 	return base64.StdEncoding.EncodeToString(buf)
 }
 
-// writeError returns an OpenAI-style error envelope.
 func writeError(c *gin.Context, status int, errType, message string) {
 	c.AbortWithStatusJSON(status, gin.H{
 		"error": gin.H{
@@ -461,9 +613,6 @@ func resolveModelID(reqModel string, env *envSettings, cred *credential) string 
 	return strings.TrimPrefix(m, "models/")
 }
 
-// embeddingsHandler returns a gin handler closure bound to a resolver.
-// The closure does no per-request auth: incoming auth is whatever
-// CLIProxyAPI itself enforces on routes registered after default setup.
 func embeddingsHandler(r *resolver) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req openAIEmbedRequest
@@ -488,7 +637,7 @@ func embeddingsHandler(r *resolver) gin.HandlerFunc {
 		}
 		if client == nil {
 			writeError(c, http.StatusServiceUnavailable, "configuration_error",
-				"no embedding credentials configured: add a gemini-api-key entry via the management UI / config.yaml, or set GCP_API_KEY / GCP_SA_JSON_PATH")
+				"no embedding credentials configured: upload a Vertex AI service account via the management UI, add a vertex-api-key or gemini-api-key entry, or set GCP_SA_JSON_PATH / GCP_API_KEY env")
 			return
 		}
 
@@ -515,9 +664,6 @@ func embeddingsHandler(r *resolver) gin.HandlerFunc {
 			return
 		}
 
-		// gemini-embedding-2 fuses parts into a single vector, so we MUST
-		// dispatch one upstream call per input. Bounded concurrency keeps
-		// latency reasonable without tripping rate limits.
 		results := make([][]float64, len(inputs))
 		errs := make([]error, len(inputs))
 		var wg sync.WaitGroup

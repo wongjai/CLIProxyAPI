@@ -1,13 +1,17 @@
 # docker-compose for the embeddings-server variant.
 #
-# Credentials are resolved at request time:
-#   1. config.yaml `gemini-api-key:` (writable via the management UI)
-#   2. env GCP_API_KEY              (Generative Language API)
-#   3. env GCP_SA_JSON_PATH + ...   (real Vertex AI via OAuth)
+# Credentials are resolved at request time (priority order):
+#   1. auths/*.json type=vertex   — Vertex SA JSON uploaded via the
+#                                   management UI's Vertex AI page.
+#   2. cfg.VertexCompatAPIKey     — `vertex-api-key:` in config.yaml
+#                                   (third-party x-goog-api-key providers).
+#   3. cfg.GeminiKey              — `gemini-api-key:` in config.yaml.
+#   4. env GCP_SA_JSON_PATH (+ GCP_PROJECT_ID, GCP_REGION) — env fallback.
+#   5. env GCP_API_KEY                                     — env fallback.
 #
 # The binary boots without any credentials configured; /v1/embeddings
 # returns 503 with a clear message until creds appear (either via the
-# management UI editing config.yaml, or via env).
+# management UI editing config.yaml / writing auth files, or via env).
 #
 # Simplest run — let the management UI configure everything:
 #   docker compose -f cmd/embeddings-server/docker-compose.yml up -d --build
