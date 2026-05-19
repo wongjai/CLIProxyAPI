@@ -1,0 +1,36 @@
+# docker-compose for the embeddings-server variant.
+#
+# Run from the repository root:
+#   GCP_SA_JSON_PATH=$PWD/vertex-sa.json \
+#   GCP_PROJECT_ID=my-project \
+#   docker compose -f cmd/embeddings-server/docker-compose.yml up -d --build
+#
+# Or place a .env beside this file with the GCP_* variables.
+
+services:
+  embeddings-server:
+    image: ${EMBED_IMAGE:-embeddings-server:latest}
+    pull_policy: build
+    build:
+      context: ../..
+      dockerfile: cmd/embeddings-server/Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: embeddings-server
+    environment:
+      GCP_SA_JSON_PATH: /secrets/vertex-sa.json
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:?GCP_PROJECT_ID is required}
+      GCP_REGION: ${GCP_REGION:-us-central1}
+      EMBED_MODEL_ID: ${EMBED_MODEL_ID:-gemini-embedding-2}
+      EMBED_DEFAULT_DIM: ${EMBED_DEFAULT_DIM:-}
+      DEPLOY: ${DEPLOY:-}
+    ports:
+      - "8317:8317"
+    volumes:
+      - ${CLI_PROXY_CONFIG_PATH:-../../config.yaml}:/CLIProxyAPI/config.yaml
+      - ${CLI_PROXY_AUTH_PATH:-../../auths}:/root/.cli-proxy-api
+      - ${CLI_PROXY_LOG_PATH:-../../logs}:/CLIProxyAPI/logs
+      - ${GCP_SA_JSON_PATH:?GCP_SA_JSON_PATH is required}:/secrets/vertex-sa.json:ro
+    restart: unless-stopped
