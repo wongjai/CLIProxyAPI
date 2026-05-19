@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
@@ -48,6 +49,14 @@ func run() error {
 	cfg, err := config.LoadConfig(env.cliproxyCfg)
 	if err != nil {
 		return fmt.Errorf("load cliproxy config %q: %w", env.cliproxyCfg, err)
+	}
+
+	// Wire the global logger to either rotating files (when
+	// logging-to-file: true) or stdout. Without this, /v0/management/logs
+	// shows nothing because the management UI reads main.log on disk.
+	// Mirrors cmd/server's behaviour.
+	if err := logging.ConfigureLogOutput(cfg); err != nil {
+		return fmt.Errorf("configure log output: %w", err)
 	}
 
 	// SIGINT/SIGTERM cancel the root context, which signals graceful
