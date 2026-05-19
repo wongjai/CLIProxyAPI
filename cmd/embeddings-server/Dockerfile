@@ -2,28 +2,34 @@
 #
 # This image bundles the standard cliproxy SDK runtime (all built-in
 # translators included via sdk/translator/builtin) PLUS an additional
-# POST /v1/embeddings route backed by Google embedding APIs. The
-# embeddings backend is chosen at runtime from environment variables:
+# POST /v1/embeddings route backed by Google embedding APIs. It is a
+# drop-in replacement for the upstream cli-proxy-api image.
 #
-#   GCP_API_KEY        → Generative Language API (no SA JSON needed)
-#   GCP_SA_JSON_PATH   → Vertex AI via OAuth (set GCP_PROJECT_ID + GCP_REGION too)
+# Credentials are resolved at request time, in priority order:
+#   1. cfg.GeminiKey         — `gemini-api-key:` in config.yaml (also
+#                              writable via the management UI). Each
+#                              entry's BaseURL/Headers are honoured.
+#   2. env GCP_API_KEY       — Generative Language API fallback.
+#   3. env GCP_SA_JSON_PATH  — real Vertex AI via OAuth
+#                              (requires GCP_PROJECT_ID, GCP_REGION).
 #
-# Exactly one of those two must be set. See cmd/embeddings-server/config.go.
+# The binary boots with NO credentials configured; /v1/embeddings returns
+# 503 with a clear message until creds appear. config.yaml is mtime-
+# watched, so adding a gemini-api-key via the management UI takes effect
+# without restarting the container.
 #
 # Build (from the repository root, NOT from this directory):
 #   docker build -f cmd/embeddings-server/Dockerfile -t embeddings-server:latest .
 #
-# Run with an API key (simplest):
+# Run (creds via config.yaml / management UI — recommended):
 #   docker run -d --name embeddings-server \
 #     -p 8317:8317 \
-#     -e GCP_API_KEY=AIza... \
-#     -e EMBED_MODEL_ID=text-embedding-004 \
 #     -v $PWD/config.yaml:/CLIProxyAPI/config.yaml \
 #     -v $PWD/auths:/root/.cli-proxy-api \
 #     -v $PWD/logs:/CLIProxyAPI/logs \
 #     embeddings-server:latest
 #
-# Run with a Vertex service account (full Vertex AI model access):
+# Run (creds via env, Vertex OAuth):
 #   docker run -d --name embeddings-server \
 #     -p 8317:8317 \
 #     -e GCP_SA_JSON_PATH=/secrets/vertex-sa.json \

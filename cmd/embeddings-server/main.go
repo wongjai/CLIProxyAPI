@@ -43,14 +43,11 @@ func run() error {
 		}
 	}
 
-	embedCfg, err := loadEmbedConfig()
-	if err != nil {
-		return fmt.Errorf("load embed config: %w", err)
-	}
+	env := loadEnvSettings()
 
-	cfg, err := config.LoadConfig(embedCfg.cliproxyCfg)
+	cfg, err := config.LoadConfig(env.cliproxyCfg)
 	if err != nil {
-		return fmt.Errorf("load cliproxy config %q: %w", embedCfg.cliproxyCfg, err)
+		return fmt.Errorf("load cliproxy config %q: %w", env.cliproxyCfg, err)
 	}
 
 	// SIGINT/SIGTERM cancel the root context, which signals graceful
@@ -58,16 +55,16 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	vc, err := newEmbedClient(ctx, embedCfg)
-	if err != nil {
-		return fmt.Errorf("init embed client: %w", err)
-	}
-	fmt.Fprintln(os.Stderr, "embeddings-server: config:", embedCfg.String())
-	embedHandler := embeddingsHandler(vc, embedCfg)
+	// The resolver picks credentials at request time from the live
+	// config.yaml (mtime-cached), with env fallbacks. The binary boots
+	// even when no credentials are configured anywhere; the handler
+	// returns 503 with a clear message until creds appear.
+	res := newResolver(env)
+	embedHandler := embeddingsHandler(res)
 
 	svc, err := cliproxy.NewBuilder().
 		WithConfig(cfg).
-		WithConfigPath(embedCfg.cliproxyCfg).
+		WithConfigPath(env.cliproxyCfg).
 		WithServerOptions(
 			api.WithRouterConfigurator(func(e *gin.Engine, _ *handlers.BaseAPIHandler, _ *config.Config) {
 				e.POST("/v1/embeddings", embedHandler)

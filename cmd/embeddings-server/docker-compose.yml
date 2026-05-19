@@ -1,11 +1,15 @@
 # docker-compose for the embeddings-server variant.
 #
-# This file targets the simpler API-key mode (Generative Language API).
-# For Vertex AI OAuth mode, see the commented block at the bottom of the
-# service definition.
+# Credentials are resolved at request time:
+#   1. config.yaml `gemini-api-key:` (writable via the management UI)
+#   2. env GCP_API_KEY              (Generative Language API)
+#   3. env GCP_SA_JSON_PATH + ...   (real Vertex AI via OAuth)
 #
-# Run from the repository root:
-#   GCP_API_KEY=AIza... \
+# The binary boots without any credentials configured; /v1/embeddings
+# returns 503 with a clear message until creds appear (either via the
+# management UI editing config.yaml, or via env).
+#
+# Simplest run — let the management UI configure everything:
 #   docker compose -f cmd/embeddings-server/docker-compose.yml up -d --build
 
 services:
