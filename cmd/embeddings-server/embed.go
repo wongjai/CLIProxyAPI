@@ -148,10 +148,19 @@ type resolver struct {
 }
 
 // embedDefaults is the optional `embed-defaults:` block in config.yaml.
-// Both fields are optional; request bodies always win.
+// All fields are optional; request bodies always win.
 type embedDefaults struct {
 	Model      string `yaml:"model"`
 	Dimensions int    `yaml:"dimensions"`
+
+	// ModelRegions overrides the Vertex AI region per model. Useful for
+	// models that are only available on the global endpoint (e.g.
+	// gemini-embedding-2 currently requires location=global, hostname
+	// aiplatform.googleapis.com with no region prefix). The map value
+	// "global" is treated specially; any other value is used as a
+	// regional name. Only affects the vertex_oauth backend; the
+	// Generative Language API and vertex-compat paths ignore it.
+	ModelRegions map[string]string `yaml:"model-regions"`
 }
 
 func newResolver(env *envSettings) *resolver {
@@ -456,13 +465,22 @@ func newEmbedClient(ctx context.Context, cred *credential) (*embedClient, error)
 	}
 }
 
-// endpoint composes the embedContent URL for the given model.
-func (ec *embedClient) endpoint(modelID string) string {
+// endpoint composes the embedContent URL for the given model and (for
+// Vertex OAuth) region. region == "global" switches to the
+// region-prefix-less hostname and the "locations/global" path. For
+// non-Vertex backends region is ignored.
+func (ec *embedClient) endpoint(modelID, region string) string {
 	switch ec.mode {
 	case authVertexOAuth:
+		if region == "global" {
+			return fmt.Sprintf(
+				"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/google/models/%s:embedContent",
+				ec.projectID, modelID,
+			)
+		}
 		return fmt.Sprintf(
 			"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:embedContent",
-			ec.region, ec.projectID, ec.region, modelID,
+			region, ec.projectID, region, modelID,
 		)
 	case authVertexCompatAPIKey:
 		base := strings.TrimRight(ec.baseURL, "/")
@@ -477,6 +495,21 @@ func (ec *embedClient) endpoint(modelID string) string {
 	default:
 		return ""
 	}
+}
+
+// resolveRegion picks the Vertex AI region for a given model. Priority:
+// model-specific override from embed-defaults.model-regions, then the
+// credential's default region. Returns "" for non-Vertex backends.
+func (ec *embedClient) resolveRegion(modelID string, defaults embedDefaults) string {
+	if ec.mode != authVertexOAuth {
+		return ""
+	}
+	if defaults.ModelRegions != nil {
+		if r := strings.TrimSpace(defaults.ModelRegions[modelID]); r != "" {
+			return r
+		}
+	}
+	return ec.region
 }
 
 // embedRequestBody is the JSON payload all backends accept.
@@ -503,7 +536,7 @@ type embedResponseBody struct {
 	} `json:"embedding"`
 }
 
-func (ec *embedClient) embed(ctx context.Context, modelID, text string, dim *int) ([]float64, error) {
+func (ec *embedClient) embed(ctx context.Context, modelID, region, text string, dim *int) ([]float64, error) {
 	body := embedRequestBody{
 		Content:              embedContent{Parts: []embedPart{{Text: text}}},
 		OutputDimensionality: dim,
@@ -520,7 +553,7 @@ func (ec *embedClient) embed(ctx context.Context, modelID, text string, dim *int
 	callCtx, cancel := context.WithTimeout(ctx, perCallTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, ec.endpoint(modelID), bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, ec.endpoint(modelID, region), bytes.NewReader(buf))
 	if err != nil {
 		return nil, err
 	}
@@ -713,13 +746,15 @@ func embeddingsHandler(r *resolver) gin.HandlerFunc {
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, defaultConcurrency)
 
+		region := client.resolveRegion(modelID, defaults)
+
 		for i, text := range inputs {
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(idx int, txt string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				vec, err := client.embed(ctx, modelID, txt, dim)
+				vec, err := client.embed(ctx, modelID, region, txt, dim)
 				if err != nil {
 					errs[idx] = err
 					return
