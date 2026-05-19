@@ -50,6 +50,7 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -59,9 +60,11 @@ const (
 	perCallTimeout     = 25 * time.Second
 
 	// Default model IDs per backend when neither the request nor the
-	// EMBED_MODEL_ID env specifies one.
+	// EMBED_MODEL_ID env specifies one. gemini-embedding-001 is the GA
+	// Vertex AI model in 2026; gemini-embedding-2 is reserved/forward-
+	// looking and isn't yet exposed by Vertex AI in most regions.
 	defaultModelGenLang = "text-embedding-004"
-	defaultModelVertex  = "gemini-embedding-2"
+	defaultModelVertex  = "gemini-embedding-001"
 
 	defaultGenLangBaseURL = "https://generativelanguage.googleapis.com"
 )
@@ -125,9 +128,15 @@ type resolver struct {
 	env *envSettings
 
 	mu sync.Mutex
-	// config.yaml cache
+	// config.yaml cache (typed via sdk/config)
 	cfgMtime time.Time
 	cfg      *sdkconfig.Config
+
+	// config.yaml custom keys our binary owns. Read with a separate
+	// permissive YAML unmarshal because sdk/config.LoadConfig drops
+	// keys not in its schema. Loaded together with cfg above on the
+	// same mtime check.
+	embedDefaults embedDefaults
 
 	// auth-dir scan cache (mtime keyed)
 	authMtime  time.Time
@@ -136,6 +145,13 @@ type resolver struct {
 	// active client cache
 	client      *embedClient
 	clientPrint string
+}
+
+// embedDefaults is the optional `embed-defaults:` block in config.yaml.
+// Both fields are optional; request bodies always win.
+type embedDefaults struct {
+	Model      string `yaml:"model"`
+	Dimensions int    `yaml:"dimensions"`
 }
 
 func newResolver(env *envSettings) *resolver {
@@ -155,10 +171,13 @@ type vertexAuthFile struct {
 
 // refreshConfig stat()s the config file and reloads via the public SDK
 // loader if mtime changed. Errors are non-fatal; we keep the old cache.
+// The same load pass picks up our custom `embed-defaults:` block via a
+// permissive raw-yaml unmarshal.
 func (r *resolver) refreshConfig() {
 	info, err := os.Stat(r.env.cliproxyCfg)
 	if err != nil {
 		r.cfg = nil
+		r.embedDefaults = embedDefaults{}
 		return
 	}
 	if r.cfg != nil && info.ModTime().Equal(r.cfgMtime) {
@@ -170,6 +189,18 @@ func (r *resolver) refreshConfig() {
 	}
 	r.cfg = newCfg
 	r.cfgMtime = info.ModTime()
+
+	// Permissive secondary parse for our custom top-level key. Failure
+	// here is silent: it just means the user has not set embed-defaults.
+	r.embedDefaults = embedDefaults{}
+	if raw, err := os.ReadFile(r.env.cliproxyCfg); err == nil {
+		var wrapper struct {
+			EmbedDefaults embedDefaults `yaml:"embed-defaults"`
+		}
+		if err := yaml.Unmarshal(raw, &wrapper); err == nil {
+			r.embedDefaults = wrapper.EmbedDefaults
+		}
+	}
 }
 
 // expandAuthDir resolves the auth-dir setting, expanding a leading "~"
@@ -335,8 +366,10 @@ func (r *resolver) selectCredential() *credential {
 }
 
 // resolveClient returns the active embedClient, rebuilding it if the
-// credential fingerprint changed since the last call.
-func (r *resolver) resolveClient(ctx context.Context) (*embedClient, *credential, error) {
+// credential fingerprint changed since the last call. Also returns a
+// snapshot of embedDefaults so the caller can read those defaults
+// without re-locking.
+func (r *resolver) resolveClient(ctx context.Context) (*embedClient, *credential, embedDefaults, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -347,19 +380,19 @@ func (r *resolver) resolveClient(ctx context.Context) (*embedClient, *credential
 	if cred == nil {
 		r.client = nil
 		r.clientPrint = ""
-		return nil, nil, nil
+		return nil, nil, r.embedDefaults, nil
 	}
 	fp := cred.fingerprint()
 	if r.client != nil && fp == r.clientPrint {
-		return r.client, cred, nil
+		return r.client, cred, r.embedDefaults, nil
 	}
 	c, err := newEmbedClient(ctx, cred)
 	if err != nil {
-		return nil, cred, err
+		return nil, cred, r.embedDefaults, err
 	}
 	r.client = c
 	r.clientPrint = fp
-	return c, cred, nil
+	return c, cred, r.embedDefaults, nil
 }
 
 // embedClient holds the authenticated HTTP client and the URL/header
@@ -598,12 +631,20 @@ func writeError(c *gin.Context, status int, errType, message string) {
 	})
 }
 
-// resolveModelID picks the upstream model name. Priority: request body,
-// EMBED_MODEL_ID env, credential default. The "models/" prefix that the
-// Generative Language docs use is stripped so the same string works for
-// both backends.
-func resolveModelID(reqModel string, env *envSettings, cred *credential) string {
+// resolveModelID picks the upstream model name. Priority:
+//
+//  1. request body            ("model" field)
+//  2. config.yaml embed-defaults.model
+//  3. env EMBED_MODEL_ID
+//  4. credential built-in default
+//
+// The "models/" prefix that the Generative Language docs use is stripped
+// so the same string works for both backends.
+func resolveModelID(reqModel string, env *envSettings, defaults embedDefaults, cred *credential) string {
 	m := strings.TrimSpace(reqModel)
+	if m == "" {
+		m = strings.TrimSpace(defaults.Model)
+	}
 	if m == "" {
 		m = env.modelOverride
 	}
@@ -630,7 +671,7 @@ func embeddingsHandler(r *resolver) gin.HandlerFunc {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), perRequestTimeout)
 		defer cancel()
 
-		client, cred, err := r.resolveClient(ctx)
+		client, cred, defaults, err := r.resolveClient(ctx)
 		if err != nil {
 			writeError(c, http.StatusServiceUnavailable, "configuration_error", err.Error())
 			return
@@ -641,7 +682,7 @@ func embeddingsHandler(r *resolver) gin.HandlerFunc {
 			return
 		}
 
-		modelID := resolveModelID(req.Model, r.env, cred)
+		modelID := resolveModelID(req.Model, r.env, defaults, cred)
 
 		var dim *int
 		if req.Dimensions != nil {
@@ -650,6 +691,9 @@ func embeddingsHandler(r *resolver) gin.HandlerFunc {
 				return
 			}
 			v := *req.Dimensions
+			dim = &v
+		} else if defaults.Dimensions > 0 {
+			v := defaults.Dimensions
 			dim = &v
 		} else if r.env.hasDefaultDim {
 			v := r.env.defaultDim
