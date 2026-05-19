@@ -58,10 +58,11 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	vc, err := newVertexClient(ctx, embedCfg)
+	vc, err := newEmbedClient(ctx, embedCfg)
 	if err != nil {
-		return fmt.Errorf("init vertex client: %w", err)
+		return fmt.Errorf("init embed client: %w", err)
 	}
+	fmt.Fprintln(os.Stderr, "embeddings-server: config:", embedCfg.String())
 	embedHandler := embeddingsHandler(vc, embedCfg)
 
 	svc, err := cliproxy.NewBuilder().

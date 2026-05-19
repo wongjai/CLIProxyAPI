@@ -1,7 +1,12 @@
 // Package main: embed.go implements the /v1/embeddings HTTP handler and a
-// small Vertex AI embedContent client. The handler is intentionally
-// self-contained: it does NOT integrate with CLIProxyAPI's auth manager,
-// per the constraint that this is a purely additive layer.
+// small embedContent client. Two upstream backends are supported behind a
+// single embedClient surface:
+//
+//   - Vertex AI via OAuth (service-account JSON, regional endpoint)
+//   - Generative Language API via API key (global endpoint, ?key=...)
+//
+// The choice is driven entirely by embedConfig; the handler does not care
+// which backend services a request.
 package main
 
 import (
@@ -14,6 +19,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -28,85 +34,132 @@ const (
 	vertexScope = "https://www.googleapis.com/auth/cloud-platform"
 
 	// defaultConcurrency bounds how many embedContent calls run in
-	// parallel for a single request. Vertex per-project QPS is small,
-	// so we keep this conservative.
+	// parallel for a single request. Per-project QPS is small, so we
+	// keep this conservative.
 	defaultConcurrency = 6
 
 	// perRequestTimeout caps the total time spent serving one
 	// /v1/embeddings call, including all parallel sub-requests.
 	perRequestTimeout = 60 * time.Second
 
-	// perCallTimeout caps a single Vertex embedContent call.
+	// perCallTimeout caps a single embedContent call.
 	perCallTimeout = 25 * time.Second
 )
 
-// vertexClient holds the authenticated HTTP client and the parameters
-// needed to address the embedContent endpoint.
-type vertexClient struct {
+// embedClient holds the authenticated HTTP client and the parameters
+// needed to address the embedContent endpoint for whichever backend is
+// configured.
+type embedClient struct {
+	mode       authMode
 	httpClient *http.Client
-	projectID  string
-	region     string
-	modelID    string
+
+	// Vertex OAuth mode
+	projectID string
+	region    string
+
+	// Generative Language API key mode
+	apiKey string
+
+	// Shared
+	modelID string
 }
 
-// newVertexClient builds an oauth2-backed HTTP client from a service-
-// account JSON file. The returned client refreshes access tokens
-// automatically via the oauth2 TokenSource.
-func newVertexClient(ctx context.Context, cfg *embedConfig) (*vertexClient, error) {
-	saBytes, err := os.ReadFile(cfg.saJSONPath)
-	if err != nil {
-		return nil, fmt.Errorf("read service account JSON: %w", err)
+// newEmbedClient constructs the appropriate backend client from the
+// loaded configuration. For Vertex OAuth it returns an oauth2-backed
+// HTTP client that refreshes access tokens automatically; for the
+// Generative Language API it uses the default HTTP client (auth is
+// carried in the URL as ?key=).
+func newEmbedClient(ctx context.Context, cfg *embedConfig) (*embedClient, error) {
+	switch cfg.mode {
+	case authVertexOAuth:
+		saBytes, err := os.ReadFile(cfg.saJSONPath)
+		if err != nil {
+			return nil, fmt.Errorf("read service account JSON: %w", err)
+		}
+		creds, err := google.CredentialsFromJSON(ctx, saBytes, vertexScope)
+		if err != nil {
+			return nil, fmt.Errorf("parse service account JSON: %w", err)
+		}
+		return &embedClient{
+			mode:       cfg.mode,
+			httpClient: oauth2.NewClient(ctx, creds.TokenSource),
+			projectID:  cfg.projectID,
+			region:     cfg.region,
+			modelID:    cfg.modelID,
+		}, nil
+
+	case authGenerativeAPIKey:
+		return &embedClient{
+			mode:       cfg.mode,
+			httpClient: &http.Client{},
+			apiKey:     cfg.apiKey,
+			modelID:    cfg.modelID,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported auth mode %q", cfg.mode)
 	}
-	creds, err := google.CredentialsFromJSON(ctx, saBytes, vertexScope)
-	if err != nil {
-		return nil, fmt.Errorf("parse service account JSON: %w", err)
+}
+
+// endpoint composes the embedContent URL for the active backend. For
+// Generative Language mode the API key is appended as a query parameter.
+func (ec *embedClient) endpoint() string {
+	switch ec.mode {
+	case authVertexOAuth:
+		return fmt.Sprintf(
+			"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:embedContent",
+			ec.region, ec.projectID, ec.region, ec.modelID,
+		)
+	case authGenerativeAPIKey:
+		return fmt.Sprintf(
+			"https://generativelanguage.googleapis.com/v1beta/models/%s:embedContent?key=%s",
+			ec.modelID, url.QueryEscape(ec.apiKey),
+		)
+	default:
+		return ""
 	}
-	return &vertexClient{
-		httpClient: oauth2.NewClient(ctx, creds.TokenSource),
-		projectID:  cfg.projectID,
-		region:     cfg.region,
-		modelID:    cfg.modelID,
-	}, nil
 }
 
-// endpoint composes the regional embedContent URL.
-func (vc *vertexClient) endpoint() string {
-	return fmt.Sprintf(
-		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:embedContent",
-		vc.region, vc.projectID, vc.region, vc.modelID,
-	)
-}
-
-// vertexEmbedRequest is the JSON payload Vertex expects per input.
+// embedRequestBody is the JSON payload both backends accept. Vertex
+// ignores the `model` field (it is encoded in the URL); the Generative
+// Language API recommends it. Sending it on Vertex is harmless.
+//
 // gemini-embedding-2 fuses all parts of a single content into one vector,
 // so callers MUST send exactly one input per request.
-type vertexEmbedRequest struct {
-	Content              vertexContent `json:"content"`
-	OutputDimensionality *int          `json:"outputDimensionality,omitempty"`
+type embedRequestBody struct {
+	Model                string       `json:"model,omitempty"`
+	Content              embedContent `json:"content"`
+	OutputDimensionality *int         `json:"outputDimensionality,omitempty"`
 }
 
-type vertexContent struct {
-	Parts []vertexPart `json:"parts"`
+type embedContent struct {
+	Parts []embedPart `json:"parts"`
 }
 
-type vertexPart struct {
+type embedPart struct {
 	Text string `json:"text"`
 }
 
-// vertexEmbedResponse mirrors the shape documented for embedContent.
-// MUST VERIFY against a real call if the upstream API changes.
-type vertexEmbedResponse struct {
+// embedResponseBody mirrors the shape both backends return. The
+// Generative Language and Vertex AI embedContent endpoints share this
+// envelope: {"embedding": {"values": [...]}}.
+type embedResponseBody struct {
 	Embedding struct {
 		Values []float64 `json:"values"`
 	} `json:"embedding"`
 }
 
 // embed performs one embedContent call for a single text input.
-func (vc *vertexClient) embed(ctx context.Context, text string, dim *int) ([]float64, error) {
-	body := vertexEmbedRequest{
-		Content:              vertexContent{Parts: []vertexPart{{Text: text}}},
+func (ec *embedClient) embed(ctx context.Context, text string, dim *int) ([]float64, error) {
+	body := embedRequestBody{
+		Content:              embedContent{Parts: []embedPart{{Text: text}}},
 		OutputDimensionality: dim,
 	}
+	if ec.mode == authGenerativeAPIKey {
+		// Generative Language API expects `models/<id>` here.
+		body.Model = "models/" + ec.modelID
+	}
+
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -115,13 +168,13 @@ func (vc *vertexClient) embed(ctx context.Context, text string, dim *int) ([]flo
 	callCtx, cancel := context.WithTimeout(ctx, perCallTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, vc.endpoint(), bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, ec.endpoint(), bytes.NewReader(buf))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := vc.httpClient.Do(req)
+	resp, err := ec.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -129,28 +182,28 @@ func (vc *vertexClient) embed(ctx context.Context, text string, dim *int) ([]flo
 
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &vertexHTTPError{status: resp.StatusCode, body: string(raw)}
+		return nil, &upstreamHTTPError{status: resp.StatusCode, body: string(raw)}
 	}
 
-	var parsed vertexEmbedResponse
+	var parsed embedResponseBody
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("decode vertex response: %w (body=%s)", err, string(raw))
+		return nil, fmt.Errorf("decode embed response: %w (body=%s)", err, string(raw))
 	}
 	if len(parsed.Embedding.Values) == 0 {
-		return nil, fmt.Errorf("vertex returned empty embedding (body=%s)", string(raw))
+		return nil, fmt.Errorf("upstream returned empty embedding (body=%s)", string(raw))
 	}
 	return parsed.Embedding.Values, nil
 }
 
-// vertexHTTPError carries the raw upstream status & body so the handler
+// upstreamHTTPError carries the raw upstream status & body so the handler
 // can translate it into an OpenAI-style error response.
-type vertexHTTPError struct {
+type upstreamHTTPError struct {
 	status int
 	body   string
 }
 
-func (e *vertexHTTPError) Error() string {
-	return fmt.Sprintf("vertex http %d: %s", e.status, e.body)
+func (e *upstreamHTTPError) Error() string {
+	return fmt.Sprintf("upstream http %d: %s", e.status, e.body)
 }
 
 // openAIEmbedRequest accepts the OpenAI embeddings request shape. `Input`
@@ -188,7 +241,6 @@ func parseInputs(raw json.RawMessage) ([]string, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("missing input field")
 	}
-	// Try string first.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		if s == "" {
@@ -196,7 +248,6 @@ func parseInputs(raw json.RawMessage) ([]string, error) {
 		}
 		return []string{s}, nil
 	}
-	// Then array of strings.
 	var arr []string
 	if err := json.Unmarshal(raw, &arr); err == nil {
 		if len(arr) == 0 {
@@ -223,9 +274,7 @@ func encodeBase64Vector(values []float64) string {
 	return base64.StdEncoding.EncodeToString(buf)
 }
 
-// writeError returns an OpenAI-style error envelope. The HTTP status code
-// mirrors OpenAI conventions: 400 for client mistakes, 502 for upstream
-// failures, 429 passed through for rate-limit signalling, etc.
+// writeError returns an OpenAI-style error envelope.
 func writeError(c *gin.Context, status int, errType, message string) {
 	c.AbortWithStatusJSON(status, gin.H{
 		"error": gin.H{
@@ -237,10 +286,8 @@ func writeError(c *gin.Context, status int, errType, message string) {
 }
 
 // embeddingsHandler returns a gin handler closure bound to the given
-// Vertex client and embeddings config. The closure does no per-request
-// auth: incoming auth is whatever CLIProxyAPI itself enforces on routes
-// it registers after the default router setup.
-func embeddingsHandler(vc *vertexClient, cfg *embedConfig) gin.HandlerFunc {
+// embed client and config.
+func embeddingsHandler(ec *embedClient, cfg *embedConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req openAIEmbedRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -254,7 +301,6 @@ func embeddingsHandler(vc *vertexClient, cfg *embedConfig) gin.HandlerFunc {
 			return
 		}
 
-		// Resolve outputDimensionality: request wins, env default fills in.
 		var dim *int
 		if req.Dimensions != nil {
 			if *req.Dimensions <= 0 {
@@ -270,7 +316,6 @@ func embeddingsHandler(vc *vertexClient, cfg *embedConfig) gin.HandlerFunc {
 
 		switch req.EncodingFormat {
 		case "", "float", "base64":
-			// supported
 		default:
 			writeError(c, http.StatusBadRequest, "invalid_request_error",
 				`encoding_format must be "float" or "base64"`)
@@ -281,7 +326,7 @@ func embeddingsHandler(vc *vertexClient, cfg *embedConfig) gin.HandlerFunc {
 		defer cancel()
 
 		// gemini-embedding-2 fuses parts into a single vector, so we MUST
-		// dispatch one Vertex call per input. Bounded concurrency keeps
+		// dispatch one upstream call per input. Bounded concurrency keeps
 		// latency reasonable for batches without tripping rate limits.
 		results := make([][]float64, len(inputs))
 		errs := make([]error, len(inputs))
@@ -294,7 +339,7 @@ func embeddingsHandler(vc *vertexClient, cfg *embedConfig) gin.HandlerFunc {
 			go func(idx int, txt string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				vec, err := vc.embed(ctx, txt, dim)
+				vec, err := ec.embed(ctx, txt, dim)
 				if err != nil {
 					errs[idx] = err
 					return
@@ -304,21 +349,18 @@ func embeddingsHandler(vc *vertexClient, cfg *embedConfig) gin.HandlerFunc {
 		}
 		wg.Wait()
 
-		// Surface the first error encountered. Rate-limit signals are
-		// preserved with their original 429 status code; everything else
-		// reports as 502 (upstream failure).
 		for _, e := range errs {
 			if e == nil {
 				continue
 			}
 			status := http.StatusBadGateway
 			errType := "upstream_error"
-			if ve, ok := e.(*vertexHTTPError); ok {
-				if ve.status == http.StatusTooManyRequests {
+			if ue, ok := e.(*upstreamHTTPError); ok {
+				if ue.status == http.StatusTooManyRequests {
 					status = http.StatusTooManyRequests
 					errType = "rate_limit_exceeded"
-				} else if ve.status >= 400 && ve.status < 500 {
-					status = ve.status
+				} else if ue.status >= 400 && ue.status < 500 {
+					status = ue.status
 					errType = "upstream_client_error"
 				}
 			}
@@ -326,7 +368,6 @@ func embeddingsHandler(vc *vertexClient, cfg *embedConfig) gin.HandlerFunc {
 			return
 		}
 
-		// Pack results in the requested encoding, preserving input order.
 		items := make([]openAIEmbeddingItem, len(results))
 		for i, vec := range results {
 			items[i] = openAIEmbeddingItem{Object: "embedding", Index: i}
@@ -346,7 +387,7 @@ func embeddingsHandler(vc *vertexClient, cfg *embedConfig) gin.HandlerFunc {
 			Object: "list",
 			Data:   items,
 			Model:  model,
-			Usage:  openAIUsage{}, // best-effort: Vertex embedContent does not return token counts here
+			Usage:  openAIUsage{}, // best-effort; embedContent does not return token counts
 		})
 	}
 }
