@@ -7,6 +7,7 @@ import (
 	"net/http/httputil"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules"
@@ -31,7 +32,7 @@ type AmpModule struct {
 	accessManager   *sdkaccess.Manager
 	authMiddleware_ gin.HandlerFunc
 	modelMapper     *DefaultModelMapper
-	enabled         bool
+	enabled         atomic.Bool
 	registerOnce    sync.Once
 
 	// restrictToLocalhost controls localhost-only access for management routes (hot-reloadable)
@@ -143,7 +144,7 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 		if upstreamURL == "" {
 			log.Debug("amp upstream proxy disabled (no upstream URL configured)")
 			log.Debug("amp provider alias routes registered")
-			m.enabled = false
+			m.enabled.Store(false)
 			return
 		}
 
@@ -195,7 +196,7 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 		oldUpstreamURL = strings.TrimSpace(oldSettings.UpstreamURL)
 	}
 
-	if !m.enabled && newUpstreamURL != "" {
+	if !m.enabled.Load() && newUpstreamURL != "" {
 		if err := m.enableUpstreamProxy(newUpstreamURL, &newSettings); err != nil {
 			log.Errorf("amp config: failed to enable upstream proxy for %s: %v", newUpstreamURL, err)
 		}
@@ -206,16 +207,16 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 	if modelMappingsChanged {
 		if m.modelMapper != nil {
 			m.modelMapper.UpdateMappings(newSettings.ModelMappings)
-		} else if m.enabled {
+		} else if m.enabled.Load() {
 			log.Warnf("amp model mapper not initialized, skipping model mapping update")
 		}
 	}
 
-	if m.enabled {
+	if m.enabled.Load() {
 		// Check upstream URL change - now supports hot-reload
 		if newUpstreamURL == "" && oldUpstreamURL != "" {
 			m.setProxy(nil)
-			m.enabled = false
+			m.enabled.Store(false)
 		} else if oldUpstreamURL != "" && newUpstreamURL != oldUpstreamURL && newUpstreamURL != "" {
 			// Recreate proxy with new URL
 			proxy, err := createReverseProxy(newUpstreamURL, m.secretSource)
@@ -283,7 +284,7 @@ func (m *AmpModule) enableUpstreamProxy(upstreamURL string, settings *config.Amp
 	}
 
 	m.setProxy(proxy)
-	m.enabled = true
+	m.enabled.Store(true)
 
 	log.Infof("amp upstream proxy enabled for: %s", upstreamURL)
 	return nil
@@ -391,11 +392,6 @@ func (m *AmpModule) hasUpstreamAPIKeysChanged(old *config.AmpCode, new *config.A
 	}
 
 	return false
-}
-
-// GetModelMapper returns the model mapper instance (for testing/debugging).
-func (m *AmpModule) GetModelMapper() *DefaultModelMapper {
-	return m.modelMapper
 }
 
 // getProxy returns the current proxy instance (thread-safe for hot-reload).

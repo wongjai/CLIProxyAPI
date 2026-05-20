@@ -11,8 +11,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// SignatureEntry holds a cached thinking signature with timestamp
-type SignatureEntry struct {
+// signatureEntry holds a cached thinking signature with timestamp
+type signatureEntry struct {
 	Signature string
 	Timestamp time.Time
 }
@@ -31,7 +31,7 @@ const (
 	CacheCleanupInterval = 10 * time.Minute
 )
 
-// signatureCache stores signatures by model group -> textHash -> SignatureEntry
+// signatureCache stores signatures by model group -> textHash -> signatureEntry
 var signatureCache sync.Map
 
 // cacheCleanupOnce ensures the background cleanup goroutine starts only once
@@ -40,7 +40,7 @@ var cacheCleanupOnce sync.Once
 // groupCache is the inner map type
 type groupCache struct {
 	mu      sync.RWMutex
-	entries map[string]SignatureEntry
+	entries map[string]signatureEntry
 }
 
 // hashText creates a stable, Unicode-safe key from text content
@@ -57,7 +57,7 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 	if val, ok := signatureCache.Load(groupKey); ok {
 		return val.(*groupCache)
 	}
-	sc := &groupCache{entries: make(map[string]SignatureEntry)}
+	sc := &groupCache{entries: make(map[string]signatureEntry)}
 	actual, _ := signatureCache.LoadOrStore(groupKey, sc)
 	return actual.(*groupCache)
 }
@@ -112,7 +112,7 @@ func CacheSignature(modelName, text, signature string) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	sc.entries[textHash] = SignatureEntry{
+	sc.entries[textHash] = signatureEntry{
 		Signature: signature,
 		Timestamp: time.Now(),
 	}

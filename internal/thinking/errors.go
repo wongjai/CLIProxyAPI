@@ -8,10 +8,6 @@ type ErrorCode string
 
 // Error codes for thinking configuration processing.
 const (
-	// ErrInvalidSuffix indicates the suffix format cannot be parsed.
-	// Example: "model(abc" (missing closing parenthesis)
-	ErrInvalidSuffix ErrorCode = "INVALID_SUFFIX"
-
 	// ErrUnknownLevel indicates the level value is not in the valid list.
 	// Example: "model(ultra)" where "ultra" is not a valid level
 	ErrUnknownLevel ErrorCode = "UNKNOWN_LEVEL"
@@ -27,10 +23,6 @@ const (
 	// ErrBudgetOutOfRange indicates the budget value is outside model range.
 	// Example: budget 64000 exceeds max 20000
 	ErrBudgetOutOfRange ErrorCode = "BUDGET_OUT_OF_RANGE"
-
-	// ErrProviderMismatch indicates the provider does not match the model.
-	// Example: applying Claude format to a Gemini model
-	ErrProviderMismatch ErrorCode = "PROVIDER_MISMATCH"
 )
 
 // ThinkingError represents an error that occurred during thinking configuration processing.

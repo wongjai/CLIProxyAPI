@@ -52,7 +52,7 @@ const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authe
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
 	engineConfigurator   func(*gin.Engine)
-	routerConfigurator   func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
+	routerConfigurator   func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config, gin.HandlerFunc)
 	requestLoggerFactory func(*config.Config, string) logging.RequestLogger
 	localPassword        string
 	keepAliveEnabled     bool
@@ -87,7 +87,7 @@ func WithEngineConfigurator(fn func(*gin.Engine)) ServerOption {
 }
 
 // WithRouterConfigurator appends a callback after default routes are registered.
-func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)) ServerOption {
+func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config, gin.HandlerFunc)) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.routerConfigurator = fn
 	}
@@ -310,7 +310,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Apply additional router configurators from options
 	if optionState.routerConfigurator != nil {
-		optionState.routerConfigurator(engine, s.handlers, cfg)
+		optionState.routerConfigurator(engine, s.handlers, cfg, AuthMiddleware(s.accessManager))
 	}
 
 	// Register management routes when configuration or environment secrets are available,

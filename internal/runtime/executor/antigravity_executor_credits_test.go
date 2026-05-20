@@ -17,7 +17,6 @@ import (
 )
 
 func resetAntigravityCreditsRetryState() {
-	antigravityCreditsFailureByAuth = sync.Map{}
 	antigravityShortCooldownByAuth = sync.Map{}
 	antigravityCreditsBalanceByAuth = sync.Map{}
 	antigravityCreditsHintRefreshByID = sync.Map{}
@@ -472,32 +471,4 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	}))
 
 	exec.updateAntigravityCreditsBalance(ctx, auth, "token")
-}
-
-func TestParseMetaFloat(t *testing.T) {
-	tests := []struct {
-		name    string
-		value   any
-		wantVal float64
-		wantOK  bool
-	}{
-		{"string", "25000", 25000, true},
-		{"float64", float64(100), 100, true},
-		{"int", int(50), 50, true},
-		{"int64", int64(75), 75, true},
-		{"empty string", "", 0, false},
-		{"invalid string", "abc", 0, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			meta := map[string]any{"key": tt.value}
-			got, ok := parseMetaFloat(meta, "key")
-			if ok != tt.wantOK {
-				t.Fatalf("parseMetaFloat() ok = %v, want %v", ok, tt.wantOK)
-			}
-			if ok && got != tt.wantVal {
-				t.Fatalf("parseMetaFloat() = %f, want %f", got, tt.wantVal)
-			}
-		})
-	}
 }

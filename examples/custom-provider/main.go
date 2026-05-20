@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
@@ -221,5 +220,4 @@ func main() {
 		panic(errRun)
 	}
 	_ = os.Stderr // keep os import used (demo only)
-	_ = time.Second
 }

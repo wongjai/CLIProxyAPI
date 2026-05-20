@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -28,7 +29,20 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin"
 )
 
+var (
+	Version   = "dev"
+	Commit    = "none"
+	BuildDate = "unknown"
+)
+
+func init() {
+	buildinfo.Version = Version
+	buildinfo.Commit = Commit
+	buildinfo.BuildDate = BuildDate
+}
+
 func main() {
+	fmt.Printf("embeddings-server Version: %s, Commit: %s, BuiltAt: %s\n", Version, Commit, BuildDate)
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "embeddings-server:", err)
 		os.Exit(1)
@@ -75,8 +89,10 @@ func run() error {
 		WithConfig(cfg).
 		WithConfigPath(env.cliproxyCfg).
 		WithServerOptions(
-			api.WithRouterConfigurator(func(e *gin.Engine, _ *handlers.BaseAPIHandler, _ *config.Config) {
-				e.POST("/v1/embeddings", embedHandler)
+			api.WithRouterConfigurator(func(e *gin.Engine, _ *handlers.BaseAPIHandler, _ *config.Config, authMW gin.HandlerFunc) {
+				v1 := e.Group("/v1")
+				v1.Use(authMW)
+				v1.POST("/embeddings", embedHandler)
 			}),
 		).
 		Build()

@@ -101,8 +101,8 @@ type Manager struct {
 	plugins   []Plugin
 }
 
-// NewManager constructs a manager with a buffered queue.
-func NewManager(buffer int) *Manager {
+// NewManager constructs a usage manager.
+func NewManager() *Manager {
 	m := &Manager{}
 	m.cond = sync.NewCond(&m.mu)
 	return m
@@ -180,6 +180,13 @@ func (m *Manager) run(ctx context.Context) {
 		item := m.queue[0]
 		m.queue = m.queue[1:]
 		m.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		m.dispatch(item)
 	}
 }
@@ -209,7 +216,7 @@ func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
 	plugin.HandleUsage(ctx, record)
 }
 
-var defaultManager = NewManager(512)
+var defaultManager = NewManager()
 
 // DefaultManager returns the global usage manager instance.
 func DefaultManager() *Manager { return defaultManager }

@@ -177,9 +177,9 @@ func (s *session) cleanup(cause error) {
 			default:
 			}
 			req.close()
+			s.pending.Delete(key)
 			return true
 		})
-		s.pending = sync.Map{}
 		_ = s.conn.Close()
 		if s.manager != nil {
 			s.manager.handleSessionClosed(s, cause)
