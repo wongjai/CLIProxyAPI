@@ -129,6 +129,9 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
+	// VertexDefaults configures default behaviors for Vertex AI OAuth/service-account requests.
+	VertexDefaults VertexDefaults `yaml:"vertex-defaults" json:"vertex-defaults"`
+
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
@@ -170,6 +173,13 @@ type ClaudeHeaderDefaults struct {
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
+}
+
+// VertexDefaults configures default behaviors for Vertex AI OAuth/service-account requests.
+type VertexDefaults struct {
+	// ModelRegions overrides the Vertex AI region per model for service-account credentials.
+	// "global" routes to aiplatform.googleapis.com without a region prefix.
+	ModelRegions map[string]string `yaml:"model-regions,omitempty" json:"model-regions,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.

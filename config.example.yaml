@@ -310,6 +310,18 @@ nonstream-keepalive-interval: 0
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
 
+# Vertex AI defaults for OAuth/service-account credentials.
+# These settings apply only to file-backed Vertex auths, not to vertex-api-key entries.
+# vertex-defaults:
+#   model-regions:
+#     # Override the Vertex AI region for specific models.
+#     # Key is the base model name, value is the region.
+#     # "global" routes to aiplatform.googleapis.com (no region prefix in hostname).
+#     # Models not listed here use the credential's default location (usually "us-central1").
+#     gemini-2.5-pro: "us-east4"
+#     gemini-embedding-001: "global"
+#     gemini-embedding-2: "global"
+
 # Amp Integration
 # ampcode:
 #   # Configure upstream URL for Amp CLI OAuth and management features
