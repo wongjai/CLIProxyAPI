@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -23,6 +24,7 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		setConfig: func(cfg *config.Config) {
 			w.SetConfig(cfg)
 		},
+		snapshotAuths: func() []*coreauth.Auth { return w.SnapshotCoreAuths() },
 		setUpdateQueue: func(queue chan<- watcher.AuthUpdate) {
 			w.SetAuthUpdateQueue(queue)
 		},

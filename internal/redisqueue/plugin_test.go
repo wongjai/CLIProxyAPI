@@ -71,7 +71,7 @@ func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 		initialHeaders.Set("X-Upstream-Request-Id", "upstream-req-1")
 		internallogging.SetResponseHeaders(ctx, initialHeaders)
 
-		mgr := coreusage.NewManager()
+		mgr := coreusage.NewManager(16)
 		defer mgr.Stop()
 
 		mgr.Register(pluginFunc(func(ctx context.Context, _ coreusage.Record) {
@@ -155,7 +155,7 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 		ctx = internallogging.WithResponseStatusHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusInternalServerError)
 
-		mgr := coreusage.NewManager()
+		mgr := coreusage.NewManager(16)
 		defer mgr.Stop()
 
 		mgr.Register(pluginFunc(func(_ context.Context, _ coreusage.Record) {

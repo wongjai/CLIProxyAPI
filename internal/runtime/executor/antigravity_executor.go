@@ -42,12 +42,14 @@ import (
 
 const (
 	antigravityBaseURLDaily                = "https://daily-cloudcode-pa.googleapis.com"
+	antigravitySandboxBaseURLDaily         = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 	antigravityBaseURLProd                 = "https://cloudcode-pa.googleapis.com"
 	antigravityCountTokensPath             = "/v1internal:countTokens"
 	antigravityStreamPath                  = "/v1internal:streamGenerateContent"
 	antigravityGeneratePath                = "/v1internal:generateContent"
 	antigravityClientID                    = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret                = "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"
+	defaultAntigravityAgent                = "antigravity/1.21.9 darwin/arm64" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
 	antigravityAuthType                    = "antigravity"
 	refreshSkew                            = 3000 * time.Second
 	antigravityCreditsHintRefreshInterval  = 10 * time.Minute
@@ -58,6 +60,11 @@ const (
 )
 
 type antigravity429Category string
+
+type antigravityCreditsFailureState struct {
+	PermanentlyDisabled      bool
+	ExplicitBalanceExhausted bool
+}
 
 type antigravity429DecisionKind string
 
@@ -81,6 +88,7 @@ type antigravity429Decision struct {
 var (
 	randSource                        = rand.New(rand.NewSource(time.Now().UnixNano()))
 	randSourceMutex                   sync.Mutex
+	antigravityCreditsFailureByAuth   sync.Map
 	antigravityShortCooldownByAuth    sync.Map
 	antigravityCreditsBalanceByAuth   sync.Map // auth.ID → antigravityCreditsBalance
 	antigravityCreditsHintRefreshByID sync.Map // auth.ID → *antigravityCreditsHintRefreshState
@@ -131,6 +139,33 @@ func antigravityAuthHasCredits(auth *cliproxyauth.Auth) bool {
 		UpdatedAt:       time.Now(),
 	})
 	return available
+}
+
+// parseMetaFloat extracts a float64 from auth.Metadata (handles string and numeric types).
+func parseMetaFloat(metadata map[string]any, key string) (float64, bool) {
+	v, ok := metadata[key]
+	if !ok {
+		return 0, false
+	}
+	switch typed := v.(type) {
+	case float64:
+		return typed, true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case uint64:
+		return float64(typed), true
+	case json.Number:
+		if f, err := typed.Float64(); err == nil {
+			return f, true
+		}
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
@@ -370,11 +405,22 @@ func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
 
+func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	antigravityCreditsFailureByAuth.Delete(strings.TrimSpace(auth.ID))
+}
 func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
 	authID := strings.TrimSpace(auth.ID)
+	state := antigravityCreditsFailureState{
+		PermanentlyDisabled:      true,
+		ExplicitBalanceExhausted: true,
+	}
+	antigravityCreditsFailureByAuth.Store(authID, state)
 	antigravityCreditsBalanceByAuth.Store(authID, antigravityCreditsBalance{
 		CreditAmount:    0,
 		MinCreditAmount: 1,
@@ -387,6 +433,13 @@ func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 		MinCreditAmount: 1,
 		UpdatedAt:       time.Now(),
 	})
+}
+
+func clearAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	antigravityCreditsFailureByAuth.Delete(strings.TrimSpace(auth.ID))
 }
 
 func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
@@ -602,6 +655,9 @@ attemptLoop:
 			}
 
 			// Success
+			if useCredits {
+				clearAntigravityCreditsFailureState(auth)
+			}
 			reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
@@ -812,6 +868,9 @@ attemptLoop:
 			}
 
 			// Stream success
+			if useCredits {
+				clearAntigravityCreditsFailureState(auth)
+			}
 			out := make(chan cliproxyexecutor.StreamChunk)
 			go func(resp *http.Response) {
 				defer close(out)
@@ -1271,6 +1330,9 @@ attemptLoop:
 			}
 
 			// Stream success
+			if useCredits {
+				clearAntigravityCreditsFailureState(auth)
+			}
 			out := make(chan cliproxyexecutor.StreamChunk)
 			go func(resp *http.Response) {
 				defer close(out)
@@ -1884,6 +1946,9 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 			PaidTierID:      paidTierID,
 			UpdatedAt:       time.Now(),
 		})
+		if creditAmount >= minAmount {
+			clearAntigravityCreditsPermanentlyDisabled(auth)
+		}
 		return
 	}
 }

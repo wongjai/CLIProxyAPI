@@ -89,10 +89,8 @@ func run() error {
 		WithConfig(cfg).
 		WithConfigPath(env.cliproxyCfg).
 		WithServerOptions(
-			api.WithRouterConfigurator(func(e *gin.Engine, _ *handlers.BaseAPIHandler, _ *config.Config, authMW gin.HandlerFunc) {
-				v1 := e.Group("/v1")
-				v1.Use(authMW)
-				v1.POST("/embeddings", embedHandler)
+			api.WithRouterConfigurator(func(e *gin.Engine, _ *handlers.BaseAPIHandler, _ *config.Config) {
+				e.POST("/v1/embeddings", embedHandler)
 			}),
 		).
 		Build()

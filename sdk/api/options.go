@@ -26,7 +26,7 @@ func WithEngineConfigurator(fn func(*gin.Engine)) ServerOption {
 }
 
 // WithRouterConfigurator appends a callback after default routes are registered.
-func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config, gin.HandlerFunc)) ServerOption {
+func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)) ServerOption {
 	return internalapi.WithRouterConfigurator(fn)
 }
 

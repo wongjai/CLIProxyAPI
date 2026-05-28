@@ -34,7 +34,7 @@ func TestAmpModule_New(t *testing.T) {
 	if m.authMiddleware_ == nil {
 		t.Fatal("authMiddleware not set")
 	}
-	if m.enabled.Load() {
+	if m.enabled {
 		t.Fatal("enabled should be false initially")
 	}
 	if m.proxy != nil {
@@ -67,7 +67,7 @@ func TestAmpModule_Register_WithUpstream(t *testing.T) {
 		t.Fatalf("register error: %v", err)
 	}
 
-	if !m.enabled.Load() {
+	if !m.enabled {
 		t.Fatal("module should be enabled with upstream URL")
 	}
 	if m.proxy == nil {
@@ -98,7 +98,7 @@ func TestAmpModule_Register_WithoutUpstream(t *testing.T) {
 		t.Fatalf("register should not error without upstream: %v", err)
 	}
 
-	if m.enabled.Load() {
+	if m.enabled {
 		t.Fatal("module should be disabled without upstream URL")
 	}
 	if m.proxy != nil {
@@ -143,8 +143,7 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := &AmpModule{}
-	m.enabled.Store(true)
+	m := &AmpModule{enabled: true}
 	ms := NewMultiSourceSecretWithPath("", p, time.Minute)
 	m.secretSource = ms
 	m.lastConfig = &config.AmpCode{
@@ -171,7 +170,7 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 }
 
 func TestAmpModule_OnConfigUpdated_NotEnabled(t *testing.T) {
-	m := &AmpModule{}
+	m := &AmpModule{enabled: false}
 
 	// Should not error or panic when disabled
 	if err := m.OnConfigUpdated(&config.Config{}); err != nil {
@@ -180,8 +179,7 @@ func TestAmpModule_OnConfigUpdated_NotEnabled(t *testing.T) {
 }
 
 func TestAmpModule_OnConfigUpdated_URLRemoved(t *testing.T) {
-	m := &AmpModule{}
-	m.enabled.Store(true)
+	m := &AmpModule{enabled: true}
 	ms := NewMultiSourceSecret("", 0)
 	m.secretSource = ms
 
@@ -195,8 +193,7 @@ func TestAmpModule_OnConfigUpdated_URLRemoved(t *testing.T) {
 
 func TestAmpModule_OnConfigUpdated_NonMultiSourceSecret(t *testing.T) {
 	// Test that OnConfigUpdated doesn't panic with StaticSecretSource
-	m := &AmpModule{}
-	m.enabled.Store(true)
+	m := &AmpModule{enabled: true}
 	m.secretSource = NewStaticSecretSource("static-key")
 
 	cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: "http://example.com"}}

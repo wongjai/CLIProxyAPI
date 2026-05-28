@@ -83,6 +83,15 @@ type FallbackHandler struct {
 	forceModelMappings func() bool
 }
 
+// NewFallbackHandler creates a new fallback handler wrapper
+// The getProxy function allows lazy evaluation of the proxy (useful when proxy is created after routes)
+func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler {
+	return &FallbackHandler{
+		getProxy:           getProxy,
+		forceModelMappings: func() bool { return false },
+	}
+}
+
 // NewFallbackHandlerWithMapper creates a new fallback handler with model mapping support
 func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, forceModelMappings func() bool) *FallbackHandler {
 	if forceModelMappings == nil {
@@ -93,6 +102,11 @@ func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper
 		modelMapper:        mapper,
 		forceModelMappings: forceModelMappings,
 	}
+}
+
+// SetModelMapper sets the model mapper for this handler (allows late binding)
+func (fh *FallbackHandler) SetModelMapper(mapper ModelMapper) {
+	fh.modelMapper = mapper
 }
 
 // WrapHandler wraps a gin.HandlerFunc with fallback logic

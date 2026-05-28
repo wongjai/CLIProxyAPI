@@ -129,9 +129,6 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
-	// VertexDefaults configures default behaviors for Vertex AI OAuth/service-account requests.
-	VertexDefaults VertexDefaults `yaml:"vertex-defaults" json:"vertex-defaults"`
-
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
@@ -148,6 +145,8 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
@@ -171,13 +170,6 @@ type ClaudeHeaderDefaults struct {
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
-}
-
-// VertexDefaults configures default behaviors for Vertex AI OAuth/service-account requests.
-type VertexDefaults struct {
-	// ModelRegions overrides the Vertex AI region per model for service-account credentials.
-	// "global" routes to aiplatform.googleapis.com without a region prefix.
-	ModelRegions map[string]string `yaml:"model-regions,omitempty" json:"model-regions,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -662,6 +654,22 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// NOTE: Startup legacy key migration is intentionally disabled.
+	// Reason: avoid mutating config.yaml during server startup.
+	// Re-enable the block below if automatic startup migration is needed again.
+	// var legacy legacyConfigData
+	// if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
+	// 	if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
+	// 		cfg.legacyMigrationPending = true
+	// 	}
+	// 	if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
+	// 		cfg.legacyMigrationPending = true
+	// 	}
+	// 	if cfg.migrateLegacyAmpConfig(&legacy) {
+	// 		cfg.legacyMigrationPending = true
+	// 	}
+	// }
+
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
@@ -734,6 +742,21 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
+
+	// NOTE: Legacy migration persistence is intentionally disabled together with
+	// startup legacy migration to keep startup read-only for config.yaml.
+	// Re-enable the block below if automatic startup migration is needed again.
+	// if cfg.legacyMigrationPending {
+	// 	fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
+	// 	if !optional && configFile != "" {
+	// 		if err := SaveConfigPreserveComments(configFile, &cfg); err != nil {
+	// 			return nil, fmt.Errorf("failed to persist migrated legacy config: %w", err)
+	// 		}
+	// 		fmt.Println("Legacy configuration normalized and persisted.")
+	// 	} else {
+	// 		fmt.Println("Legacy configuration normalized in memory; persistence skipped.")
+	// 	}
+	// }
 
 	// Return the populated configuration struct.
 	return &cfg, nil

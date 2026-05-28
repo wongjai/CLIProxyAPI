@@ -6,11 +6,13 @@ import "github.com/charmbracelet/lipgloss"
 // Color palette
 var (
 	colorPrimary   = lipgloss.Color("#7C3AED") // violet
+	colorSecondary = lipgloss.Color("#6366F1") // indigo
 	colorSuccess   = lipgloss.Color("#22C55E") // green
 	colorWarning   = lipgloss.Color("#EAB308") // yellow
 	colorError     = lipgloss.Color("#EF4444") // red
 	colorInfo      = lipgloss.Color("#3B82F6") // blue
 	colorMuted     = lipgloss.Color("#6B7280") // gray
+	colorBg        = lipgloss.Color("#1E1E2E") // dark bg
 	colorSurface   = lipgloss.Color("#313244") // slightly lighter
 	colorText      = lipgloss.Color("#CDD6F4") // light text
 	colorSubtext   = lipgloss.Color("#A6ADC8") // dimmer text
@@ -97,4 +99,28 @@ var (
 				BorderBottom(true).
 				BorderStyle(lipgloss.NormalBorder()).
 				BorderForeground(colorBorder)
+
+	tableCellStyle = lipgloss.NewStyle().
+			Foreground(colorText).
+			PaddingRight(2)
+
+	tableSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(colorPrimary).
+				Bold(true)
 )
+
+func logLevelStyle(level string) lipgloss.Style {
+	switch level {
+	case "debug":
+		return logDebugStyle
+	case "info":
+		return logInfoStyle
+	case "warn", "warning":
+		return logWarnStyle
+	case "error", "fatal", "panic":
+		return logErrorStyle
+	default:
+		return logInfoStyle
+	}
+}

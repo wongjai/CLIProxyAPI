@@ -16,7 +16,8 @@ import (
 // and creating or removing providers only when their configuration changed. It returns the final
 // ordered provider slice along with the identifiers of providers that were added, updated, or
 // removed compared to the previous configuration.
-func ReconcileProviders(_, newCfg *config.Config, existing []sdkaccess.Provider) (result []sdkaccess.Provider, added, updated, removed []string, err error) {
+func ReconcileProviders(oldCfg, newCfg *config.Config, existing []sdkaccess.Provider) (result []sdkaccess.Provider, added, updated, removed []string, err error) {
+	_ = oldCfg
 	if newCfg == nil {
 		return nil, nil, nil, nil, nil
 	}

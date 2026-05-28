@@ -79,7 +79,7 @@ var oauthToolsToRemove = map[string]bool{}
 
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
-const defaultModelMaxTokens = 8192
+const defaultModelMaxTokens = 1024
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
@@ -1617,6 +1617,10 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 	h := sha256.Sum256(payload)
 	cch := hex.EncodeToString(h[:])[:5]
 	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s;%s", version, buildHash, entrypoint, cch, workloadPart)
+}
+
+func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
