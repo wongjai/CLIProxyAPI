@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 
 	// Register all built-in protocol translators (Gemini, Claude, OpenAI,
@@ -83,14 +84,22 @@ func run() error {
 	// even when no credentials are configured anywhere; the handler
 	// returns 503 with a clear message until creds appear.
 	res := newResolver(env)
-	embedHandler := embeddingsHandler(res)
 
 	svc, err := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(env.cliproxyCfg).
 		WithServerOptions(
-			api.WithRouterConfigurator(func(e *gin.Engine, _ *handlers.BaseAPIHandler, _ *config.Config) {
-				e.POST("/v1/embeddings", embedHandler)
+			api.WithRouterConfigurator(func(e *gin.Engine, h *handlers.BaseAPIHandler, _ *config.Config) {
+				// Hand the core auth manager to the embed handler so the
+				// embeddings path can record per-credential success/failure
+				// for Vertex auth files, matching the chat-completions path
+				// (which goes through the conductor). nil-safe: if the SDK
+				// ever omits the handler, embeddings still work untracked.
+				var mgr *coreauth.Manager
+				if h != nil {
+					mgr = h.AuthManager
+				}
+				e.POST("/v1/embeddings", embeddingsHandler(res, mgr))
 			}),
 		).
 		Build()

@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -99,6 +100,12 @@ type credential struct {
 
 	modelDefault string
 	source       string
+
+	// authFile is the basename of the backing auths/*.json file for the
+	// authVertexOAuth mode (empty for all other modes). It correlates this
+	// credential with the SDK auth manager's Auth.ID so the embeddings path
+	// can record success/failure the way the chat-completions path does.
+	authFile string
 }
 
 // fingerprint hashes everything that affects the upstream call so the
@@ -307,6 +314,7 @@ func (r *resolver) selectCredential() *credential {
 				region:       region,
 				modelDefault: defaultModelVertex,
 				source:       "auths:" + filepath.Base(r.authVertex.path),
+				authFile:     filepath.Base(r.authVertex.path),
 			}
 		}
 	}
@@ -687,7 +695,7 @@ func resolveModelID(reqModel string, env *envSettings, defaults embedDefaults, c
 	return strings.TrimPrefix(m, "models/")
 }
 
-func embeddingsHandler(r *resolver) gin.HandlerFunc {
+func embeddingsHandler(r *resolver, mgr *coreauth.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req openAIEmbedRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -764,6 +772,12 @@ func embeddingsHandler(r *resolver) gin.HandlerFunc {
 		}
 		wg.Wait()
 
+		// Record per-credential health to the SDK auth manager so the
+		// management UI's success/failure counters reflect embeddings
+		// traffic, matching the chat-completions path (which goes through
+		// the conductor's MarkResult). No-op for non-Vertex-OAuth backends.
+		reportEmbedResult(mgr, cred, modelID, errs)
+
 		for _, e := range errs {
 			if e == nil {
 				continue
@@ -804,5 +818,102 @@ func embeddingsHandler(r *resolver) gin.HandlerFunc {
 			Model:  respModel,
 			Usage:  openAIUsage{},
 		})
+	}
+}
+
+// reportEmbedResult mirrors the conductor's MarkResult bookkeeping for the
+// embeddings path, which bypasses the SDK auth manager entirely. Only the
+// Vertex OAuth credential maps to a managed auth file (auths/*.json, where
+// Auth.ID == filename), so API-key and env-based backends are ignored.
+//
+// We aggregate the per-input upstream calls into one outcome per HTTP
+// request (parity with how the conductor records one result per request):
+// success when every call succeeded, otherwise the first error decides.
+// Only credential-health failures are recorded as failures; pure request
+// errors (e.g. 400 bad model, 404) are skipped so a caller's mistake never
+// marks the shared Vertex credential degraded.
+func reportEmbedResult(mgr *coreauth.Manager, cred *credential, modelID string, errs []error) {
+	if mgr == nil || cred == nil || cred.mode != authVertexOAuth || cred.authFile == "" {
+		return
+	}
+
+	authID := ""
+	for _, a := range mgr.List() {
+		if a == nil || !strings.EqualFold(a.Provider, "vertex") {
+			continue
+		}
+		if a.ID == cred.authFile || filepath.Base(a.FileName) == cred.authFile {
+			authID = a.ID
+			break
+		}
+	}
+	if authID == "" {
+		return
+	}
+
+	var firstErr error
+	for _, e := range errs {
+		if e != nil {
+			firstErr = e
+			break
+		}
+	}
+
+	// Use a background context so a cancelled/expired request context does
+	// not drop the state update (MarkResult persists the auth to disk).
+	ctx := context.Background()
+
+	if firstErr == nil {
+		mgr.MarkResult(ctx, coreauth.Result{
+			AuthID:   authID,
+			Provider: "vertex",
+			Model:    modelID,
+			Success:  true,
+		})
+		return
+	}
+
+	status := 0
+	if ue, ok := firstErr.(*upstreamHTTPError); ok {
+		status = ue.status
+	}
+	if !authHealthFailure(status) {
+		// Request-level error (bad model/input); not a credential signal.
+		return
+	}
+	mgr.MarkResult(ctx, coreauth.Result{
+		AuthID:   authID,
+		Provider: "vertex",
+		Model:    modelID,
+		Success:  false,
+		Error: &coreauth.Error{
+			Message:    firstErr.Error(),
+			HTTPStatus: status,
+			Retryable:  status == http.StatusTooManyRequests || status >= 500,
+		},
+	})
+}
+
+// authHealthFailure reports whether an upstream status reflects on the
+// credential's health (auth, quota, server, or transport) rather than the
+// caller's request. status == 0 means a network/transport error occurred
+// before any HTTP status was seen. Only these failures are surfaced to the
+// auth manager; 4xx request errors like 400/404/422 are deliberately not.
+func authHealthFailure(status int) bool {
+	switch status {
+	case 0:
+		return true
+	case http.StatusUnauthorized, // 401
+		http.StatusPaymentRequired,     // 402
+		http.StatusForbidden,           // 403
+		http.StatusRequestTimeout,      // 408
+		http.StatusTooManyRequests,     // 429
+		http.StatusInternalServerError, // 500
+		http.StatusBadGateway,          // 502
+		http.StatusServiceUnavailable,  // 503
+		http.StatusGatewayTimeout:      // 504
+		return true
+	default:
+		return false
 	}
 }
