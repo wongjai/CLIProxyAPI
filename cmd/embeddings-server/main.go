@@ -100,6 +100,10 @@ func run() error {
 					mgr = h.AuthManager
 				}
 				e.POST("/v1/embeddings", embeddingsHandler(res, mgr))
+				// Additive: per-credential model list tagged with a provider
+				// label in owned_by (canonical /v1/models dedupes by ID and
+				// hides overlapping sources). See models_by_provider.go.
+				e.GET("/v1/models/by-provider", modelsByProviderHandler(mgr))
 			}),
 		).
 		Build()
