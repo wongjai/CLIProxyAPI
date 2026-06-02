@@ -1,4 +1,4 @@
-// Package main hosts the embeddings-server binary, an additive layer that
+// Package main hosts the cliproxyapi-embed binary, an additive layer that
 // adds an OpenAI-compatible POST /v1/embeddings endpoint backed by Google
 // embedding models. Credentials are resolved at request time from the
 // live CLIProxyAPI config.yaml (so additions made via the management UI

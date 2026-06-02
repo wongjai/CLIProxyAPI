@@ -13,7 +13,7 @@
 // is emitted, so an overlapping model like gemini-3.1-pro-preview appears
 // under BOTH "Vertex (JSON)" and "Vertex (API)".
 //
-// Purely additive: lives only in cmd/embeddings-server, reads the public
+// Purely additive: lives only in cmd/cliproxyapi-embed, reads the public
 // SDK auth manager plus the internal model registry (same module), and
 // touches no upstream files — future upstream merges stay conflict-free.
 package main

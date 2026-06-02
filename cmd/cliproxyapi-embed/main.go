@@ -1,4 +1,4 @@
-// Package main: main.go bootstraps the embeddings-server. It builds the
+// Package main: main.go bootstraps cliproxyapi-embed. It builds the
 // standard CLIProxyAPI service via the public SDK and registers a
 // POST /v1/embeddings route on top of the default router using
 // WithRouterConfigurator. No upstream files are touched.
@@ -43,9 +43,9 @@ func init() {
 }
 
 func main() {
-	fmt.Printf("embeddings-server Version: %s, Commit: %s, BuiltAt: %s\n", Version, Commit, BuildDate)
+	fmt.Printf("cliproxyapi-embed Version: %s, Commit: %s, BuiltAt: %s\n", Version, Commit, BuildDate)
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "embeddings-server:", err)
+		fmt.Fprintln(os.Stderr, "cliproxyapi-embed:", err)
 		os.Exit(1)
 	}
 }
@@ -55,7 +55,7 @@ func run() error {
 	// Errors other than "file not found" are non-fatal but surfaced.
 	if wd, err := os.Getwd(); err == nil {
 		if errLoad := godotenv.Load(filepath.Join(wd, ".env")); errLoad != nil && !errors.Is(errLoad, os.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, "embeddings-server: warning: load .env:", errLoad)
+			fmt.Fprintln(os.Stderr, "cliproxyapi-embed: warning: load .env:", errLoad)
 		}
 	}
 

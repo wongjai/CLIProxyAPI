@@ -1,4 +1,4 @@
-# docker-compose for the embeddings-server variant.
+# docker-compose for the cliproxyapi-embed variant.
 #
 # Credentials are resolved at request time (priority order):
 #   1. auths/*.json type=vertex   — Vertex SA JSON uploaded via the
@@ -14,20 +14,20 @@
 # management UI editing config.yaml / writing auth files, or via env).
 #
 # Simplest run — let the management UI configure everything:
-#   docker compose -f cmd/embeddings-server/docker-compose.yml up -d --build
+#   docker compose -f cmd/cliproxyapi-embed/docker-compose.yml up -d --build
 
 services:
-  embeddings-server:
-    image: ${EMBED_IMAGE:-embeddings-server:latest}
+  cliproxyapi-embed:
+    image: ${EMBED_IMAGE:-cliproxyapi-embed:latest}
     pull_policy: build
     build:
       context: ../..
-      dockerfile: cmd/embeddings-server/Dockerfile
+      dockerfile: cmd/cliproxyapi-embed/Dockerfile
       args:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: embeddings-server
+    container_name: cliproxyapi-embed
     environment:
       # Pass through whichever auth env you set on the host; the binary
       # picks the backend based on what is non-empty.
