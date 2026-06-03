@@ -1,0 +1,115 @@
+name: Upstream Sync — Deploy
+
+on:
+  repository_dispatch:
+    types: [deploy-upstream]
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ github.event.client_payload.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+
+      - name: Fetch upstream
+        run: git fetch upstream --tags
+
+      - name: Merge upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge upstream/main --no-edit
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build test
+        run: go build -o /tmp/embed-test ./cmd/cliproxyapi-embed
+
+      - name: Format check
+        run: |
+          gofmt -l ./cmd/cliproxyapi-embed/
+          test -z "$(gofmt -l ./cmd/cliproxyapi-embed/)"
+
+      - name: Push to origin
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 upstream/main)
+          git push origin main
+          git push origin "$LATEST_TAG" || true
+
+      - name: Deploy to VPS
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$VPS_SSH_KEY" > ~/.ssh/vps_key
+          chmod 600 ~/.ssh/vps_key
+          ssh-keyscan -p 28056 35.200.50.7 >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh -p 28056 -i ~/.ssh/vps_key -o ConnectTimeout=15 root@35.200.50.7 << 'DEPLOY'
+          cd /home/docker/CLIProxyAPI
+          git pull origin main
+          git fetch origin --tags
+          VERSION=$(git describe --tags --abbrev=0) \
+          COMMIT=$(git rev-parse --short HEAD) \
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+          docker compose -f docker-compose-2.yml up -d --build
+          docker builder prune -f --reserved-space 500m
+          DEPLOY
+
+      - name: Verify deployment
+        id: verify
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          RESULT=$(ssh -p 28056 -i ~/.ssh/vps_key -o ConnectTimeout=15 root@35.200.50.7 \
+            'echo "=== Containers ===" && docker ps --format "{{.Names}}\t{{.Status}}" && echo "=== Disk ===" && df -h / | tail -1')
+          echo "$RESULT"
+          {
+            echo "result<<EOF"
+            echo "$RESULT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Notify success
+        if: success()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          jq -n \
+            --arg chat_id "$TELEGRAM_CHAT_ID" \
+            --arg text "✅ CLIProxyAPI ${VERSION} deployed
+
+          ${{ steps.verify.outputs.result }}" \
+            '{chat_id: $chat_id, text: $text}' \
+          | curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" -d @-
+
+      - name: Notify failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          jq -n \
+            --arg chat_id "$TELEGRAM_CHAT_ID" \
+            --arg text "❌ CLIProxyAPI ${VERSION} deploy FAILED
+
+          Check: https://github.com/wongjai/CLIProxyAPI/actions" \
+            '{chat_id: $chat_id, text: $text}' \
+          | curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" -d @-

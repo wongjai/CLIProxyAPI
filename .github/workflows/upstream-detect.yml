@@ -1,0 +1,130 @@
+name: Upstream Sync — Detect
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+
+      - name: Fetch upstream
+        run: git fetch upstream --tags
+
+      - name: Check for new version
+        id: check
+        run: |
+          CURRENT=$(git describe --tags --abbrev=0)
+          UPSTREAM=$(git describe --tags --abbrev=0 upstream/main)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT" = "$UPSTREAM" ]; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "Already up to date at $CURRENT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+            echo "New version available: $CURRENT → $UPSTREAM"
+          fi
+
+      - name: Try merge
+        id: merge
+        if: steps.check.outputs.new == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git merge upstream/main --no-edit 2>&1; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+
+      - name: Setup Go
+        if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Try build
+        id: build
+        if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true'
+        run: |
+          if go build -o /tmp/embed-test ./cmd/cliproxyapi-embed 2>&1; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "success=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect changelog
+        id: changelog
+        if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true' && steps.build.outputs.success == 'true'
+        run: |
+          LOG=$(git log --oneline "${{ steps.check.outputs.current }}..upstream/main" | head -15)
+          # Escape for JSON
+          LOG_ESCAPED=$(echo "$LOG" | jq -Rsa .)
+          echo "log=$LOG_ESCAPED" >> "$GITHUB_OUTPUT"
+
+      - name: Notify — merge or build failed
+        if: steps.check.outputs.new == 'true' && (steps.merge.outputs.success == 'false' || steps.build.outputs.success == 'false')
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ steps.merge.outputs.success }}" = "false" ]; then
+            REASON="Merge conflict"
+          else
+            REASON="Build failed (SDK breakage)"
+          fi
+
+          jq -n \
+            --arg chat_id "$TELEGRAM_CHAT_ID" \
+            --arg text "❌ CLIProxyAPI ${{ steps.check.outputs.upstream }} — ${REASON}
+
+          Current: ${{ steps.check.outputs.current }}
+          Manual intervention required.
+          https://github.com/wongjai/CLIProxyAPI/actions" \
+            '{chat_id: $chat_id, text: $text}' \
+          | curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" -d @-
+
+      - name: Notify — ready for approval
+        if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true' && steps.build.outputs.success == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          CHANGELOG=$(echo ${{ steps.changelog.outputs.log }} | jq -r .)
+
+          jq -n \
+            --arg chat_id "$TELEGRAM_CHAT_ID" \
+            --arg text "🔄 CLIProxyAPI ${{ steps.check.outputs.upstream }} available
+
+          Current: ${{ steps.check.outputs.current }}
+
+          Changes:
+          ${CHANGELOG}" \
+            --arg version "${{ steps.check.outputs.upstream }}" \
+            '{
+              chat_id: $chat_id,
+              text: $text,
+              reply_markup: {
+                inline_keyboard: [[
+                  {text: "✅ Approve Deploy", callback_data: ("approve:" + $version)},
+                  {text: "⏭ Skip", callback_data: ("skip:" + $version)}
+                ]]
+              }
+            }' \
+          | curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" -d @-

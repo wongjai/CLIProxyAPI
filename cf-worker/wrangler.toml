@@ -1,0 +1,10 @@
+name = "cliproxyapi-sync"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+GITHUB_REPO = "wongjai/CLIProxyAPI"
+
+# Secrets (set via `wrangler secret put <NAME>`):
+# - TELEGRAM_BOT_TOKEN
+# - GITHUB_PAT
