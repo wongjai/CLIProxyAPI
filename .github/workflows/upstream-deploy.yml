@@ -18,6 +18,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          token: ${{ secrets.DEPLOY_PAT }}
 
       - name: Add upstream remote
         run: git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
