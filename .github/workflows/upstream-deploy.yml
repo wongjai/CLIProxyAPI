@@ -78,11 +78,7 @@ jobs:
           RESULT=$(ssh -p 28056 -i ~/.ssh/vps_key -o ConnectTimeout=15 root@35.200.50.7 \
             'echo "=== Containers ===" && docker ps --format "{{.Names}}\t{{.Status}}" && echo "=== Disk ===" && df -h / | tail -1')
           echo "$RESULT"
-          {
-            echo "result<<EOF"
-            echo "$RESULT"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "$RESULT" > /tmp/verify.txt
 
       - name: Notify success
         if: success()
@@ -92,10 +88,9 @@ jobs:
         run: |
           jq -n \
             --arg chat_id "$TELEGRAM_CHAT_ID" \
-            --arg text "✅ CLIProxyAPI ${VERSION} deployed
-
-          ${{ steps.verify.outputs.result }}" \
-            '{chat_id: $chat_id, text: $text}' \
+            --arg version "$VERSION" \
+            --rawfile result /tmp/verify.txt \
+            '{chat_id: $chat_id, text: ("✅ CLIProxyAPI " + $version + " deployed\n\n" + $result)}' \
           | curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" -d @-
 
@@ -107,9 +102,7 @@ jobs:
         run: |
           jq -n \
             --arg chat_id "$TELEGRAM_CHAT_ID" \
-            --arg text "❌ CLIProxyAPI ${VERSION} deploy FAILED
-
-          Check: https://github.com/wongjai/CLIProxyAPI/actions" \
-            '{chat_id: $chat_id, text: $text}' \
+            --arg version "$VERSION" \
+            '{chat_id: $chat_id, text: ("❌ CLIProxyAPI " + $version + " deploy FAILED\n\nCheck: https://github.com/wongjai/CLIProxyAPI/actions")}' \
           | curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" -d @-

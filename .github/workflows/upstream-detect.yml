@@ -70,19 +70,21 @@ jobs:
       - name: Collect changelog
         id: changelog
         if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true' && steps.build.outputs.success == 'true'
+        env:
+          CURRENT: ${{ steps.check.outputs.current }}
         run: |
-          LOG=$(git log --oneline "${{ steps.check.outputs.current }}..upstream/main" | head -15)
-          # Escape for JSON
-          LOG_ESCAPED=$(echo "$LOG" | jq -Rsa .)
-          echo "log=$LOG_ESCAPED" >> "$GITHUB_OUTPUT"
+          git log --oneline "${CURRENT}..upstream/main" | head -15 > /tmp/changelog.txt
 
       - name: Notify — merge or build failed
         if: steps.check.outputs.new == 'true' && (steps.merge.outputs.success == 'false' || steps.build.outputs.success == 'false')
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CURRENT: ${{ steps.check.outputs.current }}
+          UPSTREAM: ${{ steps.check.outputs.upstream }}
+          MERGE_OK: ${{ steps.merge.outputs.success }}
         run: |
-          if [ "${{ steps.merge.outputs.success }}" = "false" ]; then
+          if [ "$MERGE_OK" = "false" ]; then
             REASON="Merge conflict"
           else
             REASON="Build failed (SDK breakage)"
@@ -90,12 +92,13 @@ jobs:
 
           jq -n \
             --arg chat_id "$TELEGRAM_CHAT_ID" \
-            --arg text "❌ CLIProxyAPI ${{ steps.check.outputs.upstream }} — ${REASON}
-
-          Current: ${{ steps.check.outputs.current }}
-          Manual intervention required.
-          https://github.com/wongjai/CLIProxyAPI/actions" \
-            '{chat_id: $chat_id, text: $text}' \
+            --arg current "$CURRENT" \
+            --arg version "$UPSTREAM" \
+            --arg reason "$REASON" \
+            '{
+              chat_id: $chat_id,
+              text: ("❌ CLIProxyAPI " + $version + " — " + $reason + "\n\nCurrent: " + $current + "\nManual intervention required.\nhttps://github.com/wongjai/CLIProxyAPI/actions")
+            }' \
           | curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" -d @-
 
@@ -104,21 +107,17 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CURRENT: ${{ steps.check.outputs.current }}
+          UPSTREAM: ${{ steps.check.outputs.upstream }}
         run: |
-          CHANGELOG=$(echo ${{ steps.changelog.outputs.log }} | jq -r .)
-
           jq -n \
             --arg chat_id "$TELEGRAM_CHAT_ID" \
-            --arg text "🔄 CLIProxyAPI ${{ steps.check.outputs.upstream }} available
-
-          Current: ${{ steps.check.outputs.current }}
-
-          Changes:
-          ${CHANGELOG}" \
-            --arg version "${{ steps.check.outputs.upstream }}" \
+            --arg current "$CURRENT" \
+            --arg version "$UPSTREAM" \
+            --rawfile changelog /tmp/changelog.txt \
             '{
               chat_id: $chat_id,
-              text: $text,
+              text: ("🔄 CLIProxyAPI " + $version + " available\n\nCurrent: " + $current + "\n\nChanges:\n" + $changelog),
               reply_markup: {
                 inline_keyboard: [[
                   {text: "✅ Approve Deploy", callback_data: ("approve:" + $version)},
