@@ -1,5 +1,11 @@
 name: Upstream Sync — Detect
 
+# Pure upstream tracking: CLIProxyAPI carries no custom code anymore
+# (embeddings moved to Aether). We deploy upstream's published Docker image
+# (eceasy/cli-proxy-api:<tag>) directly — no git merge, no build.
+# This job just compares the latest upstream tag against the version currently
+# running on the VPS and, if newer, asks for Telegram approval to deploy.
+
 on:
   schedule:
     - cron: '0 */6 * * *'
@@ -12,24 +18,37 @@ jobs:
   detect:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Add upstream remote
-        run: git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
-
-      - name: Fetch upstream
-        run: git fetch upstream --tags
-
-      - name: Check for new version
-        id: check
+      - name: Latest upstream tag
+        id: upstream
         run: |
-          CURRENT=$(git describe --tags --abbrev=0)
-          UPSTREAM=$(git describe --tags --abbrev=0 upstream/main)
-          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
-          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          UPSTREAM=$(git ls-remote --tags --refs \
+            https://github.com/router-for-me/CLIProxyAPI.git 'v*' \
+            | awk -F/ '{print $NF}' | sort -V | tail -1)
+          echo "version=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream: $UPSTREAM"
+
+      - name: Deployed version on VPS
+        id: deployed
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$VPS_SSH_KEY" > ~/.ssh/vps_key
+          chmod 600 ~/.ssh/vps_key
+          ssh-keyscan -p 28056 35.200.50.7 >> ~/.ssh/known_hosts 2>/dev/null
+          IMG=$(ssh -p 28056 -i ~/.ssh/vps_key -o ConnectTimeout=15 root@35.200.50.7 \
+            "docker inspect --format '{{.Config.Image}}' cli-proxy-api 2>/dev/null || true")
+          CURRENT="${IMG##*:}"
+          [ -z "$CURRENT" ] && CURRENT="unknown"
+          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Deployed on VPS: $CURRENT (image: $IMG)"
+
+      - name: Compare
+        id: check
+        env:
+          CURRENT: ${{ steps.deployed.outputs.version }}
+          UPSTREAM: ${{ steps.upstream.outputs.version }}
+        run: |
           if [ "$CURRENT" = "$UPSTREAM" ]; then
             echo "new=false" >> "$GITHUB_OUTPUT"
             echo "Already up to date at $CURRENT"
@@ -38,77 +57,32 @@ jobs:
             echo "New version available: $CURRENT → $UPSTREAM"
           fi
 
-      - name: Try merge
-        id: merge
-        if: steps.check.outputs.new == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git merge upstream/main --no-edit 2>&1; then
-            echo "success=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "success=false" >> "$GITHUB_OUTPUT"
-            git merge --abort
-          fi
-
-      - name: Setup Go
-        if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true'
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Try build
-        id: build
-        if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true'
-        run: |
-          if go build -o /tmp/embed-test ./cmd/cliproxyapi-embed 2>&1; then
-            echo "success=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "success=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Collect changelog
         id: changelog
-        if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true' && steps.build.outputs.success == 'true'
+        if: steps.check.outputs.new == 'true'
         env:
-          CURRENT: ${{ steps.check.outputs.current }}
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ steps.deployed.outputs.version }}
+          UPSTREAM: ${{ steps.upstream.outputs.version }}
         run: |
-          git log --oneline "${CURRENT}..upstream/main" | head -15 > /tmp/changelog.txt
-
-      - name: Notify — merge or build failed
-        if: steps.check.outputs.new == 'true' && (steps.merge.outputs.success == 'false' || steps.build.outputs.success == 'false')
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CURRENT: ${{ steps.check.outputs.current }}
-          UPSTREAM: ${{ steps.check.outputs.upstream }}
-          MERGE_OK: ${{ steps.merge.outputs.success }}
-        run: |
-          if [ "$MERGE_OK" = "false" ]; then
-            REASON="Merge conflict"
-          else
-            REASON="Build failed (SDK breakage)"
-          fi
-
-          jq -n \
-            --arg chat_id "$TELEGRAM_CHAT_ID" \
-            --arg current "$CURRENT" \
-            --arg version "$UPSTREAM" \
-            --arg reason "$REASON" \
-            '{
-              chat_id: $chat_id,
-              text: ("❌ CLIProxyAPI " + $version + " — " + $reason + "\n\nCurrent: " + $current + "\nManual intervention required.\nhttps://github.com/wongjai/CLIProxyAPI/actions")
-            }' \
-          | curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -H "Content-Type: application/json" -d @-
+          : > /tmp/changelog.txt
+          case "$CURRENT" in
+            v*)
+              gh api "repos/router-for-me/CLIProxyAPI/compare/${CURRENT}...${UPSTREAM}" \
+                --jq '.commits[].commit.message | split("\n")[0]' 2>/dev/null \
+                | head -15 > /tmp/changelog.txt || true
+              ;;
+          esac
+          [ -s /tmp/changelog.txt ] || \
+            echo "(release notes: https://github.com/router-for-me/CLIProxyAPI/releases)" > /tmp/changelog.txt
 
       - name: Notify — ready for approval
-        if: steps.check.outputs.new == 'true' && steps.merge.outputs.success == 'true' && steps.build.outputs.success == 'true'
+        if: steps.check.outputs.new == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CURRENT: ${{ steps.check.outputs.current }}
-          UPSTREAM: ${{ steps.check.outputs.upstream }}
+          CURRENT: ${{ steps.deployed.outputs.version }}
+          UPSTREAM: ${{ steps.upstream.outputs.version }}
         run: |
           jq -n \
             --arg chat_id "$TELEGRAM_CHAT_ID" \
@@ -117,7 +91,7 @@ jobs:
             --rawfile changelog /tmp/changelog.txt \
             '{
               chat_id: $chat_id,
-              text: ("🔄 CLIProxyAPI " + $version + " available\n\nCurrent: " + $current + "\n\nChanges:\n" + $changelog),
+              text: ("🔄 CLIProxyAPI " + $version + " available\n\nDeployed: " + $current + "\n\nChanges:\n" + $changelog),
               reply_markup: {
                 inline_keyboard: [[
                   {text: "✅ Approve Deploy", callback_data: ("approve:" + $version)},

@@ -49,7 +49,7 @@ pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
-# When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
+# When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
 # When true, write application logs to rotating files instead of stdout
@@ -301,18 +301,6 @@ nonstream-keepalive-interval: 0
 #     excluded-models:                            # optional: models to exclude from listing
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
-
-# Vertex AI defaults for OAuth/service-account credentials.
-# These settings apply only to file-backed Vertex auths, not to vertex-api-key entries.
-# vertex-defaults:
-#   model-regions:
-#     # Override the Vertex AI region for specific models.
-#     # Key is the base model name, value is the region.
-#     # "global" routes to aiplatform.googleapis.com (no region prefix in hostname).
-#     # Models not listed here use the credential's default location (usually "us-central1").
-#     gemini-2.5-pro: "us-east4"
-#     gemini-embedding-001: "global"
-#     gemini-embedding-2: "global"
 
 # Amp Integration
 # ampcode:
