@@ -34,7 +34,7 @@ jobs:
             "cd /home/docker/CLIProxyAPI && \
              CLI_PROXY_IMAGE=$IMG docker compose -f docker-compose-2.yml pull && \
              CLI_PROXY_IMAGE=$IMG docker compose -f docker-compose-2.yml up -d --remove-orphans && \
-             docker image prune -f"
+             docker images 'eceasy/cli-proxy-api' --format '{{.Repository}}:{{.Tag}}' | grep -v \":${VERSION}\$\" | xargs -r docker rmi || true"
 
       - name: Verify deployment
         id: verify
