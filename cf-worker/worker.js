@@ -1,4 +1,12 @@
 export default {
+  // Cron trigger (see wrangler.toml): drives the upstream detect workflow.
+  // GitHub auto-disables workflows that carry a `schedule:` trigger after 60
+  // days of repository inactivity, and this fork never gets commits (pure
+  // upstream tracking). Scheduling from here instead keeps detection alive.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(triggerDetect(env));
+  },
+
   async fetch(request, env) {
     if (request.method !== "POST") {
       return new Response("OK", { status: 200 });
@@ -20,21 +28,7 @@ export default {
     });
 
     if (action === "approve") {
-      const ghRes = await fetch(
-        `https://api.github.com/repos/${env.GITHUB_REPO}/dispatches`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${env.GITHUB_PAT}`,
-            Accept: "application/vnd.github.v3+json",
-            "User-Agent": "CLIProxyAPI-Sync-Worker",
-          },
-          body: JSON.stringify({
-            event_type: "deploy-upstream",
-            client_payload: { version },
-          }),
-        }
-      );
+      const ghRes = await ghDispatch(env, "deploy-upstream", { version });
 
       const statusLine = ghRes.ok
         ? `\n\n🚀 Deploy triggered for ${version}`
@@ -56,6 +50,33 @@ export default {
     return new Response("OK", { status: 200 });
   },
 };
+
+async function triggerDetect(env) {
+  const ghRes = await ghDispatch(env, "detect-upstream", {});
+  if (ghRes.ok || !env.TELEGRAM_CHAT_ID) {
+    return;
+  }
+  // Silent cron failures are how this pipeline went stale in the first place.
+  await tgAPI(env, "sendMessage", {
+    chat_id: env.TELEGRAM_CHAT_ID,
+    text: `⚠️ CLIProxyAPI sync: could not trigger upstream detect (HTTP ${ghRes.status})`,
+  });
+}
+
+async function ghDispatch(env, eventType, payload) {
+  return fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_PAT}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "CLIProxyAPI-Sync-Worker",
+    },
+    body: JSON.stringify({
+      event_type: eventType,
+      client_payload: payload,
+    }),
+  });
+}
 
 async function tgAPI(env, method, body) {
   return fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {

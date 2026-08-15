@@ -6,9 +6,15 @@ name: Upstream Sync — Detect
 # This job just compares the latest upstream tag against the version currently
 # running on the VPS and, if newer, asks for Telegram approval to deploy.
 
+# Scheduling lives in the Cloudflare Worker (cf-worker/, cron every 6h) rather
+# than a `schedule:` trigger here. GitHub auto-disables scheduled workflows after
+# 60 days of repository inactivity, and this fork never receives commits — that
+# silently killed detection on 2026-08-09. A workflow without `schedule:` is not
+# subject to that rule.
+
 on:
-  schedule:
-    - cron: '0 */6 * * *'
+  repository_dispatch:
+    types: [detect-upstream]
   workflow_dispatch:
 
 permissions:

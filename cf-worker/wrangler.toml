@@ -5,6 +5,13 @@ compatibility_date = "2025-01-01"
 [vars]
 GITHUB_REPO = "wongjai/CLIProxyAPI"
 
+# Drives Upstream Sync — Detect via repository_dispatch. The workflow itself
+# carries no `schedule:` trigger, so GitHub can't auto-disable it for repository
+# inactivity (which it did on 2026-08-09).
+[triggers]
+crons = ["0 */6 * * *"]
+
 # Secrets (set via `wrangler secret put <NAME>`):
 # - TELEGRAM_BOT_TOKEN
 # - GITHUB_PAT
+# - TELEGRAM_CHAT_ID (optional; only used to alert when a cron dispatch fails)
